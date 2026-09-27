@@ -9,6 +9,9 @@ An open-source Python library and Unix CLI tool (`vqrng`) for generating unbiase
 
 `vqrng` bridges the gap between quantum circuit execution and real-world application pipelines, combining **unbiased rejection sampling** with **tamper-evident JSON evidence logging** and optional **Bell's Theorem (CHSH Inequality)** device-independent certification.
 
+**⚠️Status: Work in Progress (Active Development)**  
+This package is currently under heavy development. **Not ready for production use yet!**
+
 ---
 
 ## Executive Summary & Goals

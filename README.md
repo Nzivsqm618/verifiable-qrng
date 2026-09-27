@@ -24,7 +24,7 @@ Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs r
 
 ## Key Features
 
-* **Python SDK & Unix Pipeline CLI:** Import `vqrng` directly inside Python projects or chain `vqrng` in Unix shell pipelines. Stdout is plain numbers by default; pass `-j` for the canonical JSON evidence payload.
+* **Python SDK & Unix Pipeline CLI:** Import `vqrng` directly inside Python projects or chain `vqrng` in Unix shell pipelines. Stdout is plain numbers by default, one per line. Pass `-r` for one space-separated line, or `-j` for the canonical JSON evidence payload.
 * **Strict Rejection Sampling:** Guarantees zero modulo bias across any arbitrary `[min, max]` bounds.
 * **QPU Budget Control:** Enforces maximum execution runtime limits for IBM Quantum jobs, cleanly separating queue duration from active QPU compute time.
 * **Offline Verification Engine:** Includes a built-in verification suite (`vqrng verify`) to audit evidence files and detect post-generation tampering.
@@ -47,7 +47,9 @@ pip install -e .
 
 ## Quick Start: CLI Usage
 
-By default, `vqrng` writes plain random numbers to stdout (`74`, or one number per line for a pool) so the output is ready for shell scripts and pipes. Logs and status updates go to stderr. Pass `-j` / `--json` to write the full canonical JSON evidence payload instead.
+By default, `vqrng` writes plain random numbers to stdout (`74`, or one number per line for a pool) so the output is ready for shell scripts and pipes. Logs and status updates go to stderr. Pass `-r` / `--raw` to print a pool on one space-separated line, or `-j` / `--json` to write the full canonical JSON evidence payload instead.
+
+Help is `--help`. `-h` selects IBM Quantum hardware, not help.
 
 ### 1. Basic Generation (Simulator Mode)
 
@@ -109,7 +111,19 @@ vqrng -s -d 6 --pad
 
 Running `vqrng` without `-j` prints only plain random numbers. Supplying `-j` or `--json` prints the full cryptographic canonical JSON evidence dictionary instead.
 
-Use it for verification logging, cryptographic audit trails, piping into `vqrng verify`, and storing provenance records.
+Use it for verification logging, cryptographic audit trails, piping into `vqrng verify`, and storing provenance records. `-j` cannot be combined with `-r`.
+
+### `-r`, `--raw` (Single-Line Output)
+
+Prints the pool as space-separated values on one line, for example `741829 938201`. The default remains one value per line. `-r` cannot be combined with `-j`.
+
+```bash
+vqrng -s -r -p 3 1 100
+```
+
+### `--help`
+
+Prints the generated usage text and exits. `-h` / `--hardware` selects IBM Quantum hardware and requires `-t` / `--runtime`.
 
 ### `-d`, `--digits INTEGER` (Quantum OTP and PIN Shortcut)
 
@@ -175,9 +189,8 @@ else:
 
 * **Quantum Framework:** Qiskit 1.x, `qiskit-ibm-runtime`
 * **Simulation Engine:** `qiskit-aer`
-* **CLI & Packaging:** `argparse` / `click`, `setuptools` / `pyproject.toml`
+* **CLI & Packaging:** `argparse`, `setuptools`, `pyproject.toml`
 * **Language:** Python 3.10+
-* **Data Analysis & Viz:** NumPy, SciPy, Matplotlib
 
 ---
 

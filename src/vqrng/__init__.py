@@ -4,7 +4,7 @@ from vqrng.backends import AerBackend, BackendJobError, BackendRun, BaseBackend,
 from vqrng.core import GenerationError, generate, resolve_range
 from vqrng.verifier import LevelResult, VerificationResult, verify
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "AerBackend",
     "BackendJobError",

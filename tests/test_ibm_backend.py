@@ -248,6 +248,11 @@ class TestTiming:
         run = IBMBackend(log=lambda message: None).run(build_circuit(1), 8, 10)
         assert run.isa_sha256 is None and run.bitstrings == ["0"]
 
+    def test_short_fractional_seconds_parse_on_python_3_10(self):
+        assert ibm_module.execution_window_from_metrics({
+            "timestamps": {"running": "2026-09-28T06:00:12.5Z", "finished": "2026-09-28T06:00:14.12Z"},
+        }) == ("2026-09-28T06:00:12.500000+00:00", "2026-09-28T06:00:14.120000+00:00")
+
     def test_charge_time_is_used_when_quantum_seconds_is_absent(self):
         assert ibm_module.quantum_seconds_from_metrics({"usage": {"qpu_charge_time_seconds": 3}}) == 3.0
 

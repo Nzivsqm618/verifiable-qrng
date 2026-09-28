@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from vqrng.backends.base import BackendJobError, BackendRun, BaseBackend, normalize_bitstrings
-from vqrng.evidence import sha256_hex
+from vqrng.evidence import parse_timestamp, sha256_hex
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -54,12 +54,7 @@ def status_name(status: Any) -> str:
 
 
 def _parse_time(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return parse_timestamp(value)
 
 
 def execution_window_from_metrics(metrics: Mapping[str, Any]) -> tuple[str | None, str | None]:

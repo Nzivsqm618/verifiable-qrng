@@ -73,11 +73,23 @@ def utc_now() -> str:
 
 
 def parse_timestamp(value: Any) -> datetime | None:
-    """Parse an ISO 8601 timestamp that carries a UTC offset, or return ``None``."""
+    """Parse an ISO 8601 timestamp that carries a UTC offset, or return ``None``.
+
+    Fractional seconds are padded to six digits first. Python 3.10's
+    ``fromisoformat`` only accepts the widths ``isoformat`` itself emits,
+    while IBM reports widths such as ``.5``.
+    """
     if not isinstance(value, str):
         return None
+    text = value.strip().replace("Z", "+00:00")
+    dot = text.find(".")
+    if dot != -1:
+        end = dot + 1
+        while end < len(text) and text[end].isdigit():
+            end += 1
+        text = text[:dot] + "." + (text[dot + 1:end] + "000000")[:6] + text[end:]
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None

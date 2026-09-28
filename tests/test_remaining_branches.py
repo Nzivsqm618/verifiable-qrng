@@ -5,13 +5,11 @@ import itertools
 import runpy
 import sys
 import warnings
-from types import SimpleNamespace
 
 import pytest
 
 import vqrng
 from vqrng import cli
-from vqrng.core import build_circuit, hardware_source
 from vqrng.verifier.level_a import verify_level_a
 from tests.test_generate import fake_source
 
@@ -102,63 +100,10 @@ class TestCoreBranches:
             assert budget == 2
             return ["0"], "ibm_fake", 1.0
 
-        monkeypatch.setattr("vqrng.core.hardware_source", source)
+        monkeypatch.setattr("vqrng.core.IBMBackend", lambda backend: source)
         evidence = vqrng.generate(0, 1, mode="hardware", runtime_limit=2)
         assert evidence["backend"] == "ibm_fake"
         assert evidence["quantum_seconds"] == 1.0
-
-    @pytest.mark.parametrize(
-        ("token", "budget", "usage", "expected_limit", "expected_used"),
-        [
-            ("secret", 2.9, 4, 2, 4.0),
-            (None, None, None, None, 0.0),
-        ],
-    )
-    def test_hardware_source(self, monkeypatch, token, budget, usage, expected_limit, expected_used):
-        circuit = build_circuit(1)
-        seen = {}
-
-        class Service:
-            def __init__(self, token=None):
-                seen["token"] = token
-
-            def least_busy(self, **kwargs):
-                return SimpleNamespace(name="ibm_brisbane")
-
-        class Sampler:
-            def __init__(self, mode):
-                self.options = SimpleNamespace()
-
-            def run(self, circuits, shots):
-                seen["limit"] = getattr(self.options, "max_execution_time", None)
-
-                class Job:
-                    def result(self):
-                        bits = SimpleNamespace(get_bitstrings=lambda: ["0"])
-                        return [SimpleNamespace(data={circuit.cregs[0].name: bits})]
-
-                    def usage(self):
-                        return usage
-
-                return Job()
-
-        monkeypatch.setattr(
-            "qiskit.transpiler.preset_passmanagers.generate_preset_pass_manager",
-            lambda **kwargs: SimpleNamespace(run=lambda circ: circ),
-        )
-        monkeypatch.setattr("qiskit_ibm_runtime.QiskitRuntimeService", Service)
-        monkeypatch.setattr("qiskit_ibm_runtime.SamplerV2", Sampler)
-        if token is None:
-            monkeypatch.delenv("IBMQ_API_TOKEN", raising=False)
-        else:
-            monkeypatch.setenv("IBMQ_API_TOKEN", token)
-
-        bitstrings, name, used = hardware_source(circuit, 8, budget)
-        assert bitstrings == ["0"]
-        assert name == "ibm_brisbane"
-        assert used == expected_used
-        assert seen["limit"] == expected_limit
-        assert seen["token"] == token
 
 
 class TestVerifierBranches:

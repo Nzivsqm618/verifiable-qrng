@@ -27,9 +27,9 @@ Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs r
 
 ## Key Features
 
-* **Python SDK & Unix Pipeline CLI:** Import `vqrng` directly inside Python projects or chain `vqrng` in Unix shell pipelines. Stdout is plain numbers by default, one per line. Pass `-r` for one space-separated line, or `-j` for the canonical JSON evidence payload.
+* **Python SDK & Unix Pipeline CLI:** Import `vqrng` directly inside Python projects or chain `vqrng` in Unix shell pipelines. Stdout is plain numbers by default, one per line. Pass `-r` for one space-separated line, or `-j` for one compact canonical JSON line.
 * **Strict Rejection Sampling:** Guarantees zero modulo bias across any arbitrary `[min, max]` bounds.
-* **QPU Budget Control:** Enforces maximum execution runtime limits for IBM Quantum jobs, cleanly separating queue duration from active QPU compute time.
+* **QPU Budget Control:** `-t` stops `vqrng` from submitting another IBM job once the reported QPU time is used. It is not a cap IBM enforces, and queue time is recorded separately from QPU time.
 * **Offline Verification Engine:** Includes a built-in verification suite (`vqrng verify`) to audit evidence files and detect post-generation tampering.
 * **CHSH Entanglement Engine:** Optional device-independent entropy verification using non-orthogonal measurement bases (A<sub>0</sub>, A<sub>1</sub>, B<sub>0</sub>, B<sub>1</sub>) to prove *S* > 2 quantum non-locality.
 
@@ -50,7 +50,7 @@ pip install -e .
 
 ## Quick Start: CLI Usage
 
-By default, `vqrng` writes plain random numbers to stdout (`74`, or one number per line for a pool) so the output is ready for shell scripts and pipes. Logs and status updates go to stderr. Pass `-r` / `--raw` to print a pool on one space-separated line, or `-j` / `--json` to write the full canonical JSON evidence payload instead.
+By default, `vqrng` writes plain random numbers to stdout (`74`, or one number per line for a pool) so the output is ready for shell scripts and pipes. Logs and status updates go to stderr. Pass `-r` / `--raw` to print a pool on one space-separated line, or `-j` / `--json` to write one compact canonical JSON line (sorted keys, no extra whitespace), the same encoding used for `pool_hash`.
 
 Help is `--help`. `-h` selects IBM Quantum hardware, not help.
 
@@ -72,19 +72,28 @@ vqrng -s -p 20 1 1000
 
 ### 3. Run on IBM Quantum Hardware
 
-Submit to physical IBM QPU hardware with a 300-second maximum QPU runtime budget:
+Submit to physical IBM QPU hardware, and stop submitting further jobs after 300 seconds of reported QPU time:
 
 ```bash
 export IBMQ_API_TOKEN="your_ibm_quantum_api_token"
 vqrng -h -t 300 -p 10 1 100
+
+# N-digit OTP on hardware, pinned to a specific QPU
+vqrng -h -t 300 --backend ibm_torino -d 6 --pad
 ```
+
+`vqrng` uses the least busy operational QPU unless `--backend` is given. Job status (`QUEUED`, `RUNNING`, `DONE`, `ERROR`, `CANCELLED`) is reported on stderr with timestamps, so stdout carries only the numbers or JSON. The evidence records `quantum_seconds` (QPU time reported by IBM), `charged_seconds` (what was counted against `-t`), `queue_seconds`, `wall_seconds`, and the IBM `job_ids`. Pressing Ctrl+C while a job is waiting cancels it so it does not use more QPU time.
+
+**`-t` is not an IBM billing cap.** Using `-h` prints a warning. IBM bills the QPU seconds a job actually uses, and one job can cost more than `-t` (a `-t 2` job can be billed 3 seconds). When that happens the evidence sets `"budget_exceeded": true` and `vqrng` warns on stderr. `-t` only stops `vqrng` from submitting a further job once the reported time is used up. `vqrng` does not set IBM's execution-time limit on the job: when that limit trips, IBM cancels the job and still charges the time already used, so the credit is spent and no numbers come back.
+
+When IBM does not report a job's final QPU usage, `vqrng` counts the whole remaining `-t` budget against further jobs, so it does not submit another one. If generation stops early (budget exhausted, a job ends in `ERROR` or `CANCELLED`, or the job can no longer be polled), the command exits with status 1 and prints the job ids on stderr. With `-j`, it also prints the partial evidence (`"status": "partial"`) on stdout, so values and shots already paid for are kept.
 
 ### 4. JSON Evidence and Verification
 
 Write the evidence payload, pipe it into the verifier, or audit a saved file. Verification requires the JSON payload, so generation commands that feed `vqrng verify` must include `-j`.
 
 ```bash
-# Full cryptographic evidence on stdout
+# One compact canonical JSON line on stdout
 vqrng -s -j 1 100
 
 # Pipeline verification
@@ -93,6 +102,16 @@ vqrng -s -j -p 50 1 1000 | vqrng verify
 # File verification
 vqrng verify evidence.json
 ```
+
+`vqrng verify` reports each level separately and exits with status 1 if any implemented level fails:
+
+```text
+PASS: Level A (reproducible conversion)
+PASS: Level B (tamper-evident provenance)
+SKIP: Level C (device-independent certification) is not implemented yet
+```
+
+The evidence `tape` records every measured shot of every job, including the unused tail of the last batch. `pool_hash` is the SHA-256 of the canonical JSON of the whole payload except `pool_hash` itself. Only evidence format version `"2"` verifies.
 
 ### 5. N-Digit Tokens (OTP and PIN)
 
@@ -112,7 +131,7 @@ vqrng -s -d 6 --pad
 
 ### `-j`, `--json` (Evidence Payload Output)
 
-Running `vqrng` without `-j` prints only plain random numbers. Supplying `-j` or `--json` prints the full cryptographic canonical JSON evidence dictionary instead.
+Running `vqrng` without `-j` prints only plain random numbers. Supplying `-j` or `--json` prints one compact canonical JSON line (sorted keys, no extra whitespace). That is the same encoding used for `pool_hash`.
 
 Use it for verification logging, cryptographic audit trails, piping into `vqrng verify`, and storing provenance records. `-j` cannot be combined with `-r`.
 
@@ -126,7 +145,7 @@ vqrng -s -r -p 3 1 100
 
 ### `--help`
 
-Prints the generated usage text and exits. `-h` / `--hardware` selects IBM Quantum hardware and requires `-t` / `--runtime`.
+Prints the generated usage text and exits. `-h` / `--hardware` selects IBM Quantum hardware and requires `-t` / `--runtime`. `-t` stops further jobs after that many reported QPU seconds. It does not cap what IBM bills for the job already submitted.
 
 ### `-d`, `--digits INTEGER` (Quantum OTP and PIN Shortcut)
 
@@ -160,6 +179,17 @@ print(f"Generated Numbers: {[item['number'] for item in evidence['items']]}")
 print(f"Canonical Pool Hash: {evidence['pool_hash']}")
 ```
 
+If sampling stops before the pool fills, `generate` raises `vqrng.GenerationError`. Its `evidence` attribute holds the partial payload:
+
+```python
+try:
+    evidence = vqrng.generate(1, 100, mode="hardware", runtime_limit=300, pool_size=50)
+except vqrng.GenerationError as exc:
+    evidence = exc.evidence  # status == "partial"; accepted values, job ids, and shots so far
+```
+
+`backend` accepts either an IBM QPU name (hardware mode) or a `vqrng.BaseBackend` instance to run on instead of the default.
+
 ### Offline Verification
 
 ```python
@@ -172,6 +202,9 @@ if result.is_valid:
     print("✓ Verification Passed: Hash and conversion logic verified!")
 else:
     print(f"✗ Verification Failed: {result.errors}")
+
+for level in result.levels.values():
+    print(level.level, level.status, level.errors)  # status is "pass", "fail", or "skipped"
 ```
 
 ---

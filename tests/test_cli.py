@@ -3,7 +3,9 @@ import os
 
 import pytest
 
+import vqrng
 from vqrng import cli
+from vqrng.evidence import canonical_json
 
 
 def fake_evidence(values):
@@ -93,6 +95,7 @@ class TestOutputFormats:
         _, out, err = run(capsys, "-p", "2", "1", "999999")
         assert out == "741829\n938201\n"
         assert "generating" in err
+        assert "does not cap" not in err
 
     def test_raw_space_separated(self, calls, capsys):
         _, out, _ = run(capsys, "-r", "-p", "2", "1", "999999")
@@ -150,8 +153,10 @@ class TestModeFlags:
     def test_help_is_long_option_only(self, capsys):
         with pytest.raises(SystemExit) as exc:
             cli.main(["--help"])
+        out = capsys.readouterr().out
         assert exc.value.code == 0
-        assert "--hardware" in capsys.readouterr().out
+        assert "--hardware" in out
+        assert "Not an IBM cap" in out
 
 
 def test_runtime_warnings_stay_off_the_console(monkeypatch, capsys):
@@ -209,3 +214,10 @@ class TestEndToEndAer:
         evidence = json.loads(out)
         assert code == 0
         assert all(1 <= item["number"] <= 6 for item in evidence["items"])
+
+    def test_json_line_is_canonical(self, capsys):
+        code, out, _ = run(capsys, "-s", "-j", "1", "100")
+        assert code == 0
+        evidence = json.loads(out)
+        assert out == canonical_json(evidence) + "\n"
+        assert vqrng.verify(evidence).is_valid

@@ -65,9 +65,10 @@ class TestRejectionSampling:
         assert items[1]["rejected"] == ["101", "110"]
         assert items[2]["rejected"] == []
 
-    def test_pool_hash_matches_items(self):
+    def test_pool_hash_covers_the_whole_payload(self):
         evidence = vqrng.generate(0, 7, pool_size=4, _source=fake_source(range(8)))
-        assert evidence["pool_hash"] == sha256_hex(canonical_json(evidence["items"]))
+        body = {k: v for k, v in evidence.items() if k != "pool_hash"}
+        assert evidence["pool_hash"] == sha256_hex(canonical_json(body))
         assert evidence["circuit"]["sha256"] == sha256_hex(evidence["circuit"]["qasm"])
 
     def test_evidence_metadata(self):

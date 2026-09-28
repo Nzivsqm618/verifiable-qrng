@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
 from collections.abc import Sequence
 
 import vqrng
+from vqrng.evidence import canonical_json
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 _RUNTIME_LOG_LEVEL = "QISKIT_IBM_RUNTIME_LOG_LEVEL"
+_LEVEL_LABELS = {"pass": "PASS", "fail": "FAIL", "skipped": "SKIP"}
 
 
 class UsageError(Exception):
@@ -46,20 +47,28 @@ def build_parser() -> argparse.ArgumentParser:
                         help="With --digits, allow leading zeros and print zero-padded strings.")
 
     output = parser.add_mutually_exclusive_group()
-    output.add_argument("-j", "--json", action="store_true", help="Print the full JSON evidence payload.")
+    output.add_argument(
+        "-j", "--json", action="store_true",
+        help="Print one compact canonical JSON line (sorted keys, no extra whitespace), "
+             "the same encoding used for pool_hash.",
+    )
     output.add_argument("-r", "--raw", action="store_true", help="Print numbers space-separated on one line.")
 
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("-s", "--simulator", dest="mode", action="store_const", const="aer",
                       help="Run on the local Qiskit Aer simulator (default).")
     mode.add_argument("-h", "--hardware", dest="mode", action="store_const", const="hardware",
-                      help="Run on IBM Quantum hardware (requires --runtime).")
+                      help="Run on IBM Quantum hardware (requires --runtime). "
+                           "IBM bills actual QPU time, which can exceed --runtime.")
     parser.set_defaults(mode="aer")
 
     parser.add_argument("-p", "--pool", type=_positive_int, default=1, metavar="INTEGER",
                         help="Number of values to generate (default: 1).")
     parser.add_argument("-t", "--runtime", type=_positive_int, metavar="INTEGER",
-                        help="Maximum QPU runtime budget in seconds.")
+                        help="With -h/--hardware, stop submitting further jobs after this many "
+                             "reported QPU seconds. Not an IBM cap: one job can cost more.")
+    parser.add_argument("--backend", metavar="NAME",
+                        help="With -h/--hardware, run on this IBM QPU instead of the least busy one.")
 
     parser.add_argument("--help", action="help", help="Show this message and exit.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {vqrng.__version__}")
@@ -83,12 +92,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         raise UsageError("--pad requires -d/--digits")
     if args.mode == "hardware" and args.runtime is None:
         raise UsageError("-t/--runtime is required with -h/--hardware")
+    if args.backend is not None and args.mode != "hardware":
+        raise UsageError("--backend requires -h/--hardware")
     return args
 
 
 def render(evidence: dict, as_json: bool, raw: bool) -> str:
     if as_json:
-        return json.dumps(evidence, indent=2)
+        return canonical_json(evidence)
     values = [item["formatted"] for item in evidence["items"]]
     return (" " if raw else "\n").join(values)
 
@@ -174,13 +185,29 @@ def verify_main(argv: Sequence[str]) -> int:
         return EXIT_ERROR
 
     result = vqrng.verify(text)
-    if result.is_valid:
-        _write(sys.stdout, "PASS: Level A conversion verified.")
-        return EXIT_OK
-    _write(sys.stdout, "FAIL: Level A verification failed.")
-    for error in result.errors:
-        _write(sys.stdout, f"  - {error}")
-    return EXIT_ERROR
+    for level in result.levels.values():
+        suffix = " is not implemented yet" if level.status == "skipped" else ""
+        _write(sys.stdout, f"{_LEVEL_LABELS[level.status]}: Level {level.level} ({level.name}){suffix}")
+        for error in level.errors:
+            _write(sys.stdout, f"  - {error}")
+    if result.evidence_status == "partial":
+        _write(sys.stdout, "NOTE: partial evidence; generation stopped before the pool filled.")
+    return EXIT_OK if result.is_valid else EXIT_ERROR
+
+
+def _report_partial(exc: vqrng.GenerationError, as_json: bool) -> None:
+    evidence = exc.evidence
+    _write(sys.stderr, f"vqrng: error: {exc}")
+    jobs = ", ".join(evidence["job_ids"]) or "none"
+    _write(
+        sys.stderr,
+        f"vqrng: stopped with {len(evidence['items'])}/{evidence['request']['pool_size']} value(s); "
+        f"job ids: {jobs}",
+    )
+    if as_json:
+        _write(sys.stdout, render(evidence, True, False))
+    else:
+        _write(sys.stderr, "vqrng: partial evidence was not printed; pass -j/--json to keep it.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -196,6 +223,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_ERROR
 
     _write(sys.stderr, f"vqrng: generating {args.pool} value(s) on {args.mode}")
+    if args.mode == "hardware":
+        _write(
+            sys.stderr,
+            f"vqrng: warning: -t {args.runtime} does not cap what IBM bills. A job can use more "
+            f"than {args.runtime}s of QPU time, and that time is charged. -t only stops vqrng "
+            "from submitting another job. vqrng does not set an execution-time limit on the "
+            "job: IBM cancels the job when that limit trips and still charges the time used.",
+        )
     previous_env, previous_level = _quiet_runtime_logs()
     try:
         try:
@@ -207,7 +242,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mode=args.mode,
                 pool_size=args.pool,
                 runtime_limit=args.runtime,
+                backend=args.backend,
             )
+        except KeyboardInterrupt:
+            _write(sys.stderr, "vqrng: interrupted.")
+            return EXIT_ERROR
+        except vqrng.GenerationError as exc:
+            _report_partial(exc, args.json)
+            return EXIT_ERROR
         except Exception as exc:
             _write(sys.stderr, f"vqrng: error: {exc}")
             return EXIT_ERROR

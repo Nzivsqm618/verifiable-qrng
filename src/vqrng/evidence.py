@@ -14,6 +14,12 @@ STATUS_COMPLETED = "completed"
 STATUS_PARTIAL = "partial"
 STATUSES = (STATUS_COMPLETED, STATUS_PARTIAL)
 
+# Measurement settings in the order the CHSH sum uses them, and the
+# two-bit outcomes of each, Alice's bit first.
+CHSH_SETTINGS = ("A0B0", "A0B1", "A1B0", "A1B1")
+CHSH_OUTCOMES = ("00", "01", "10", "11")
+CHSH_CLASSICAL_BOUND = 2.0
+
 
 def resolve_range(
     min_val: int | None, max_val: int | None, digits: int | None, pad: bool

@@ -103,13 +103,15 @@ vqrng -s -j -p 50 1 1000 | vqrng verify
 vqrng verify evidence.json
 ```
 
-`vqrng verify` reports each level separately and exits with status 1 if any implemented level fails:
+`vqrng verify` reports each level separately and exits with status 1 if any level that ran fails. Level C runs only when the evidence was generated with `--chsh`:
 
 ```text
 PASS: Level A (reproducible conversion)
 PASS: Level B (tamper-evident provenance)
-SKIP: Level C (device-independent certification) is not implemented yet
+Level C (Physical CHSH Non-locality): PASSED (S = 2.82)
 ```
+
+Without `--chsh` the last line is `SKIP: Level C (Physical CHSH Non-locality) was not run; the evidence has no chsh_data`.
 
 The evidence `tape` records every measured shot of every job, including the unused tail of the last batch. `pool_hash` is the SHA-256 of the canonical JSON of the whole payload except `pool_hash` itself. Only evidence format version `"2"` verifies.
 
@@ -142,6 +144,16 @@ Prints the pool as space-separated values on one line, for example `741829 93820
 ```bash
 vqrng -s -r -p 3 1 100
 ```
+
+### `--chsh` (CHSH Bell Test for Level C)
+
+After the pool fills, also runs four Bell-state circuits on the same backend, one per measurement setting (Alice at 0 or π/2, Bob at π/4 or −π/4), 1024 shots each. The outcome counts go into the evidence under `chsh_data`, which `pool_hash` covers:
+
+```bash
+vqrng --chsh -j 1 100 | vqrng verify
+```
+
+Level C computes each correlation E = (N<sub>00</sub> + N<sub>11</sub> − N<sub>01</sub> − N<sub>10</sub>) / N and S = |E(A0,B0) + E(A0,B1) + E(A1,B0) − E(A1,B1)|. It passes when S > 2, the classical limit. The quantum maximum is 2√2 ≈ 2.83. On hardware the four circuits are four more IBM jobs, and their QPU time counts against `-t`. If the budget runs out or a job fails before all four finish, the command exits with status 1, and `chsh_data.error` says why.
 
 ### `--help`
 
@@ -205,6 +217,9 @@ else:
 
 for level in result.levels.values():
     print(level.level, level.status, level.errors)  # status is "pass", "fail", or "skipped"
+
+# With vqrng.generate(..., chsh=True)
+print(result.level_c_passed, result.chsh_s_value)  # e.g. True 2.83
 ```
 
 ---
@@ -217,7 +232,7 @@ for level in result.levels.values():
 | --- | --- | --- | --- |
 | Level A | Reproducible Conversion | Replays raw measurement bits against the rejection sampling algorithm. | Proves range conversion was computed correctly from raw bits without modulo bias. |
 | Level B | Tamper-Evident Provenance | Audits canonical SHA-256 pool hashes, circuit QASM hashes, and backend IDs. | Proves evidence content has not been altered post-generation under trusted server key models. |
-| Level C | Device-Independent Certification | Executes Bell/CHSH violation protocol ($S > 2$). | Mathematically proves physical non-locality and true quantum entropy independent of hardware trust. |
+| Level C | Physical CHSH Non-locality | Computes the CHSH value $S$ from the Bell-test counts recorded with `--chsh`. | Shows the backend's reported counts violate the classical bound ($S > 2$). The numbers themselves come from a separate circuit, and nothing in the evidence rules out forged counts, so this is not device-independent certification of the pool. |
 
 ---
 

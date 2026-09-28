@@ -245,7 +245,7 @@ class TestCli:
         assert out.splitlines() == [
             "PASS: Level A (reproducible conversion)",
             "PASS: Level B (tamper-evident provenance)",
-            "SKIP: Level C (device-independent certification) is not implemented yet",
+            "SKIP: Level C (Physical CHSH Non-locality) was not run; the evidence has no chsh_data",
         ]
 
     def test_verify_notes_partial_evidence(self, partial, capsys, monkeypatch):

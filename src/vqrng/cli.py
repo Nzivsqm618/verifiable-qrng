@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "reported QPU seconds. Not an IBM cap: one job can cost more.")
     parser.add_argument("--backend", metavar="NAME",
                         help="With -h/--hardware, run on this IBM QPU instead of the least busy one.")
+    parser.add_argument("--chsh", action="store_true",
+                        help="Also run the 4 CHSH Bell-test circuits and record their counts for "
+                             "Level C. On hardware they are 4 more jobs within -t/--runtime.")
 
     parser.add_argument("--help", action="help", help="Show this message and exit.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {vqrng.__version__}")
@@ -160,6 +163,12 @@ def _stdin_is_terminal() -> bool:
     return bool(isatty and isatty())
 
 
+def _chsh_line(level: vqrng.LevelResult, s_value: float | None) -> str:
+    verdict = "PASSED" if level.passed else "FAILED"
+    detail = "" if s_value is None else f" (S = {s_value:.2f})"
+    return f"Level C ({level.name}): {verdict}{detail}"
+
+
 def verify_main(argv: Sequence[str]) -> int:
     try:
         args = build_verify_parser().parse_args(argv)
@@ -186,8 +195,11 @@ def verify_main(argv: Sequence[str]) -> int:
 
     result = vqrng.verify(text)
     for level in result.levels.values():
-        suffix = " is not implemented yet" if level.status == "skipped" else ""
-        _write(sys.stdout, f"{_LEVEL_LABELS[level.status]}: Level {level.level} ({level.name}){suffix}")
+        if level.level == "C" and level.status != "skipped":
+            _write(sys.stdout, _chsh_line(level, result.chsh_s_value))
+        else:
+            suffix = " was not run; the evidence has no chsh_data" if level.status == "skipped" else ""
+            _write(sys.stdout, f"{_LEVEL_LABELS[level.status]}: Level {level.level} ({level.name}){suffix}")
         for error in level.errors:
             _write(sys.stdout, f"  - {error}")
     if result.evidence_status == "partial":
@@ -243,6 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pool_size=args.pool,
                 runtime_limit=args.runtime,
                 backend=args.backend,
+                chsh=args.chsh,
             )
         except KeyboardInterrupt:
             _write(sys.stderr, "vqrng: interrupted.")

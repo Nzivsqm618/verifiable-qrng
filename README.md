@@ -1,5 +1,6 @@
 # Verifiable Quantum Random Number Generator (`vqrng`)
 
+[![PyPI](https://img.shields.io/pypi/v/vqrng)](https://pypi.org/project/vqrng/)
 [![Python package](https://github.com/Nzivsqm618/verifiable-qrng/actions/workflows/python-package.yml/badge.svg)](https://github.com/Nzivsqm618/verifiable-qrng/actions/workflows/python-package.yml)
 [![Qiskit](https://img.shields.io/badge/Qiskit-1.x-6929C4?logo=qiskit&logoColor=white)](https://qiskit.org/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -42,18 +43,21 @@ Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs r
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/Nzivsqm618/verifiable-qrng.git
-cd verifiable-qrng
+pip install vqrng
 
-# Install library and CLI executable in editable mode
-pip install -e .
-
-# Add signing support (Ed25519 via the `cryptography` package)
-pip install -e ".[sign]"
+# Ed25519 signing (the `cryptography` package). Quotes keep the extra intact in PowerShell.
+pip install "vqrng[sign]"
 ```
 
 Verification, including signature checks, needs only the standard library. Only signing needs `cryptography`.
+
+To work on the source tree:
+
+```bash
+git clone https://github.com/Nzivsqm618/verifiable-qrng.git
+cd verifiable-qrng
+pip install -e ".[dev]"
+```
 
 ---
 
@@ -246,7 +250,7 @@ If the CHSH job fails, the command exits with status 1, and `chsh_data.error` sa
 
 ### `--sign-key FILE`
 
-Signs `pool_hash` with the hex Ed25519 private key seed in `FILE` and adds `signature` and `public_key` to the evidence. It needs `pip install vqrng[sign]`. A bad key is rejected before any job is submitted.
+Signs `pool_hash` with the hex Ed25519 private key seed in `FILE` and adds `signature` and `public_key` to the evidence. It needs `pip install "vqrng[sign]"`. A bad key is rejected before any job is submitted.
 
 ### `vqrng verify --trusted-key HEX`
 

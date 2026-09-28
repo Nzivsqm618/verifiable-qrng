@@ -7,7 +7,7 @@ from vqrng.health import EntropyHealthError
 from vqrng.qseed import QSeed, QSeedError
 from vqrng.verifier import LevelResult, VerificationResult, verify
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __all__ = [
     "AerBackend",
     "BackendJobError",

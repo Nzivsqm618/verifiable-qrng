@@ -137,8 +137,57 @@ def _restore_runtime_logs(previous_env: str | None, previous_level: int) -> None
         os.environ[_RUNTIME_LOG_LEVEL] = previous_env
 
 
+def build_verify_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="vqrng verify", description="Verify a vqrng JSON evidence payload offline.")
+    parser.add_argument("file", metavar="FILE", nargs="?",
+                        help="Evidence JSON file. Omit to read JSON piped on stdin.")
+    return parser
+
+
+def _stdin_is_terminal() -> bool:
+    isatty = getattr(sys.stdin, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def verify_main(argv: Sequence[str]) -> int:
+    try:
+        args = build_verify_parser().parse_args(argv)
+    except UsageError as exc:
+        _write(sys.stderr, f"vqrng verify: error: {exc}")
+        return EXIT_ERROR
+
+    if args.file is None and _stdin_is_terminal():
+        build_verify_parser().print_help(sys.stdout)
+        return EXIT_OK
+
+    try:
+        if args.file is None or args.file == "-":
+            text = sys.stdin.read()
+        else:
+            with open(args.file, encoding="utf-8") as handle:
+                text = handle.read()
+    except OSError as exc:
+        _write(sys.stderr, f"vqrng verify: error: {exc}")
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        _write(sys.stderr, "vqrng verify: interrupted.")
+        return EXIT_ERROR
+
+    result = vqrng.verify(text)
+    if result.is_valid:
+        _write(sys.stdout, "PASS: Level A conversion verified.")
+        return EXIT_OK
+    _write(sys.stdout, "FAIL: Level A verification failed.")
+    for error in result.errors:
+        _write(sys.stdout, f"  - {error}")
+    return EXIT_ERROR
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_stdio()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["verify"]:
+        return verify_main(argv[1:])
     try:
         args = parse_args(argv)
     except UsageError as exc:

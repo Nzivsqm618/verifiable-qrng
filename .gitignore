@@ -23,6 +23,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+.coverage
+.coverage.*
+htmlcov/
+
+tests/path_coverage/
+
 .ipynb_checkpoints
 *-checkpoint.ipynb
 

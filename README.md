@@ -1,13 +1,14 @@
 # Verifiable Quantum Random Number Generator (`vqrng`)
 
+[![Python package](https://github.com/Nzivsqm618/verifiable-qrng/actions/workflows/python-package.yml/badge.svg)](https://github.com/Nzivsqm618/verifiable-qrng/actions/workflows/python-package.yml)
 [![Qiskit](https://img.shields.io/badge/Qiskit-1.x-6929C4?logo=qiskit&logoColor=white)](https://qiskit.org/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![CLI Tool](https://img.shields.io/badge/CLI-vqrng-green.svg)](https://github.com/your-org/vqrng)
+[![CLI Tool](https://img.shields.io/badge/CLI-vqrng-green.svg)](https://github.com/Nzivsqm618/verifiable-qrng)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 An open-source Python library and Unix CLI tool (`vqrng`) for generating unbiased random integers from quantum measurements with Qiskit, together with an evidence record that can be audited offline.
 
-`vqrng` combines **HMAC-SHA256 conditioning**, **unbiased rejection sampling**, **tamper-evident JSON evidence** with optional **Ed25519 signatures**, and an optional **CHSH (Bell inequality) spot-check** run alongside the pool.
+`vqrng` combines **continuous health tests** on the raw bits, **HMAC-SHA256 conditioning**, **unbiased rejection sampling**, **tamper-evident JSON evidence** with optional **Ed25519 signatures**, an optional **CHSH (Bell inequality) spot-check** run alongside the pool, and an optional **live check against the IBM jobs** a record names. **QSeed** expands one recorded seed into a fast local PCG64 stream for simulations.
 
 **⚠️ Status: Educational & Research-grade Verifiable QRNG Framework - Not ready for production cryptographic key generation.**
 
@@ -17,21 +18,24 @@ An open-source Python library and Unix CLI tool (`vqrng`) for generating unbiase
 
 Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs rely on opaque physical noise or deterministic seed states. `vqrng` is a dual-interface (SDK + CLI) framework for studying verifiable quantum randomness:
 
-* **Conditioning, then Unbiased Integer Conversion:** Raw measurement bits are conditioned with HMAC-SHA256, then mapped to `[min, max]` by strict rejection sampling (n<sub>bits</sub> = ⌈log<sub>2</sub>(range_size)⌉), so the mapping adds no modulo bias.
+* **Health Tests, Conditioning, then Unbiased Integer Conversion:** Raw measurement bits must pass the SP 800-90B Repetition Count and Adaptive Proportion tests, are then conditioned with HMAC-SHA256, and are mapped to `[min, max]` by strict rejection sampling (n<sub>bits</sub> = ⌈log<sub>2</sub>(range_size)⌉), so the mapping adds no modulo bias.
 * **Tamper-Evident Provenance:** Records every raw shot, the conditioned candidates, rejected candidates, circuit hashes, and a canonical SHA-256 `pool_hash` for offline auditing. An optional Ed25519 signature ties the record to a key you trust.
 * **Dual Execution Modes:** Local testing with the `qiskit-aer` simulator, and execution on physical IBM Quantum QPUs.
-* **Graduated Verification Hierarchy:** Reproducible conversion (Level A), self-consistency and optional signature checks (Level B), and a near-real-time CHSH spot-check (Level C).
+* **Graduated Verification Hierarchy:** Reproducible conversion (Level A), self-consistency and optional signature checks (Level B), and a near-real-time CHSH spot-check (Level C), all offline, plus an optional live comparison with IBM's copy of the jobs.
 
 ---
 
 ## Key Features
 
 * **Python SDK & Unix Pipeline CLI:** Import `vqrng` directly inside Python projects or chain `vqrng` in Unix shell pipelines. Stdout is plain numbers by default, one per line. Pass `-r` for one space-separated line, or `-j` for one compact canonical JSON line.
+* **Continuous Health Tests:** Every batch of raw bits goes through the SP 800-90B Repetition Count Test and Adaptive Proportion Test before conditioning. A stuck or grossly biased source stops the run, and the failure is kept in the evidence.
 * **HMAC-SHA256 Entropy Conditioning:** Every 512 raw bits are conditioned into 256 output bits before rejection sampling, using only the Python standard library (`hmac`, `hashlib`).
 * **Strict Rejection Sampling:** Maps conditioned bits to any `[min, max]` range with no modulo bias.
 * **QPU Budget Control:** `-t` stops `vqrng` from submitting another IBM job once the reported QPU time is used. It is not a cap IBM enforces, and queue time is recorded separately from QPU time.
-* **Offline Verification Engine:** `vqrng verify` audits evidence files, detects edits made after generation, and checks signatures against keys you pass with `--trusted-key`.
-* **CHSH Spot-Check:** Optional Bell test with non-orthogonal measurement bases (A<sub>0</sub>, A<sub>1</sub>, B<sub>0</sub>, B<sub>1</sub>), run in the same job as the first pool batch. Level C checks *S* > 2 and that the runs happened within 10 seconds of the pool, on the same backend.
+* **Offline Verification Engine:** `vqrng verify` audits evidence files, detects edits made after generation, replays the health tests, and checks signatures against keys you pass with `--trusted-key`.
+* **Live IBM Check:** `vqrng verify --ibm` asks IBM, with your own token, whether the jobs named in the evidence still report the same backend, execution window, shots, and submitted circuits.
+* **CHSH Spot-Check:** Optional Bell test with non-orthogonal measurement bases (A<sub>0</sub>, A<sub>1</sub>, B<sub>0</sub>, B<sub>1</sub>), run in the same job as the first pool batch. Level C checks *S* > 2 and that the runs happened within 10 seconds of the pool, on the same backend. `--require-chsh` makes a missing spot-check fail.
+* **QSeed:** `vqrng seed` collects one 32-byte seed with full evidence, and `vqrng expand` turns it into millions of numbers locally with NumPy's PCG64. The expanded numbers are classical and replayable by anyone holding the record.
 
 ---
 
@@ -39,8 +43,8 @@ Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs r
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/vqrng.git
-cd vqrng
+git clone https://github.com/Nzivsqm618/verifiable-qrng.git
+cd verifiable-qrng
 
 # Install library and CLI executable in editable mode
 pip install -e .
@@ -118,11 +122,34 @@ PASS: Level B (tamper-evident provenance) via checksum only (self-consistent; no
 Level C (near-real-time CHSH spot-check): PASSED (S = 2.82)
 ```
 
-Level C runs only when the evidence was generated with `--chsh`. Otherwise its line is `SKIP: Level C (near-real-time CHSH spot-check) was not run; the evidence has no chsh_data`.
+Level C runs only when the evidence was generated with `--chsh`. Otherwise its line is `SKIP: Level C (near-real-time CHSH spot-check) was not run; the evidence has no chsh_data`, and the record can still verify. Pass `vqrng verify --require-chsh` to make a missing spot-check fail instead.
 
-The evidence `tape` records every raw measured shot of every job, including the unused tail of the last batch. `extractor` records the conditioning parameters. Each item's `bitstring` and `rejected` entries are conditioned candidates, and Level B recomputes them from the raw tape. `pool_hash` is the SHA-256 of the canonical JSON of the whole payload except `pool_hash`, `signature`, and `public_key`. Only evidence format version `"3"` verifies.
+The evidence `tape` records every raw measured shot of every job, including the unused tail of the last batch. `health` records the health-test results over that raw stream, and `extractor` the conditioning parameters. Each item's `bitstring` and `rejected` entries are conditioned candidates, and Level B recomputes the health results and the candidates from the raw tape. On IBM hardware, each tape batch also records `isa_sha256`, the SHA-256 of the transpiled circuit actually submitted. `pool_hash` is the SHA-256 of the canonical JSON of the whole payload except `pool_hash`, `signature`, and `public_key`. `kind` is `"pool"` for numbers and `"seed"` for a QSeed record. Only evidence format version `"4"` verifies.
 
-### 5. Signed Evidence
+### 5. Health Tests
+
+Before a batch of raw bits is conditioned, it goes through the two continuous health tests of NIST SP 800-90B section 4.4, for a binary source:
+
+| Test | Fails when | Cutoff |
+| --- | --- | --- |
+| Repetition Count Test | The same raw bit repeats 41 times in a row, across shots and batches | 41 |
+| Adaptive Proportion Test | In a 1024-bit window, 793 or more bits equal the window's first bit | 793 |
+
+The cutoffs follow from a false-positive rate α = 2<sup>−20</sup> and **an assumed** min-entropy of H<sub>min</sub> = 0.5 bits per raw bit, the same assumption the 2:1 HMAC conditioning relies on. `vqrng` does not measure H<sub>min</sub>. When a test fails, sampling stops, the failing batch stays on the tape with the error, and the command exits with status 1. When fewer than 1024 raw bits were measured, `health.apt` is `"not_enough_bits"`: the proportion test did not run.
+
+These tests are a fault alarm, not NIST validation. They catch a stuck or grossly biased qubit. A good PRNG, including the Aer simulator, passes them, and so does a perfectly predictable source such as `0101…`.
+
+### 6. Live IBM Check
+
+```bash
+vqrng verify --ibm evidence.json
+```
+
+`--ibm` uses `IBMQ_API_TOKEN` or `QISKIT_IBM_TOKEN` to load every job named on the tape. For each job it compares status (`DONE`), backend name, whether the backend is a simulator, IBM's execution window, the pool shots, the CHSH counts, and, while IBM still returns them, the hashes of the submitted circuits. If IBM no longer has a job, the check fails. When IBM no longer returns the submitted circuits, the check says so in a `NOTE:` line instead of comparing their hashes. Offline `vqrng verify` never contacts IBM.
+
+A pass shows that the jobs this token can see still match the evidence. It is not hardware attestation: IBM is still trusted for the shots, and a verifier who cannot see those jobs cannot run the check. For third parties without access to the jobs, sign the evidence.
+
+### 7. Signed Evidence
 
 A checksum only shows that a record is self-consistent. Anyone who edits a record can recompute `pool_hash`. To tie evidence to its producer, sign it with an Ed25519 key, and have verifiers check it against the public key they already trust:
 
@@ -148,7 +175,30 @@ The payload then carries `signature` and `public_key` (hex). Level B reports one
 
 With `--trusted-key`, Level B fails unless the evidence is signed by one of those keys.
 
-### 6. N-Digit Numbers
+### 8. QSeed: Fast Local Expansion of a Recorded Seed
+
+Each QPU call costs queue time and credit, so calling `vqrng` inside a hot loop is impractical. QSeed spends one seed job and expands it locally:
+
+```bash
+# Collect a 32-byte seed on IBM hardware, with the usual evidence (always printed as JSON)
+vqrng seed -h -t 30 --chsh --sign-key signing.key > seed.json
+vqrng verify --require-chsh --trusted-key <PUBLIC_KEY_HEX> seed.json
+
+# Expand it: one million integers in [1, 100], computed locally with PCG64
+vqrng expand seed.json -p 1000000 1 100
+
+# For testing, a simulator seed needs --allow-simulator to expand
+vqrng seed -s > sim-seed.json
+vqrng expand sim-seed.json --allow-simulator -p 10 1 100
+```
+
+`vqrng seed` runs the normal pipeline (health tests, conditioning, shot tape, optional CHSH and signature) for 32 values over [0, 255], an exact 8-bit range, so nothing is rejected and the values are the seed bytes. The record has `kind: "seed"`, the `seed` as hex, and `expander: "numpy.random.PCG64"`. Levels A–C and `--ibm` verify it like any record. Level A also checks that `seed` equals the item bytes. `-s` or `-h` must be given explicitly.
+
+`vqrng expand` refuses a record whose `pool_hash` no longer matches, one without a complete seed, and a simulator seed unless `--allow-simulator` is passed. It does not run `vqrng verify`, so verify the record first. Bounds are inclusive, like the rest of `vqrng`. `-r` prints one space-separated line.
+
+**What QSeed output is not.** The expanded numbers are PCG64 output, classical and deterministic from the seed. The seed is in the evidence on purpose, so anyone holding the record can replay the whole stream. It is not a CSPRNG and not quantum output. Use it for Monte Carlo, simulation, and test data, never for keys, tokens, or anything an adversary must not predict. Replaying a stream exactly also needs the same NumPy version.
+
+### 9. N-Digit Numbers
 
 Generate an N-digit number without setting `MIN_VAL` and `MAX_VAL` by hand:
 
@@ -202,6 +252,18 @@ Signs `pool_hash` with the hex Ed25519 private key seed in `FILE` and adds `sign
 
 Trusts the given hex Ed25519 public key. The flag can be repeated. When it is given, Level B passes only for evidence signed by one of these keys, and reports it as authentic.
 
+### `vqrng verify --require-chsh`
+
+Makes Level C fail, instead of being skipped, when the evidence has no `chsh_data`.
+
+### `vqrng verify --ibm`
+
+Adds the live IBM job check described above. It needs an IBM token that can see the jobs, and it is the only verification step that uses the network.
+
+### `vqrng seed` and `vqrng expand`
+
+`vqrng seed (-s | -h -t N) [--backend NAME] [--chsh] [--sign-key FILE]` collects a seed record and prints it as canonical JSON, including partial evidence when the job fails. `vqrng expand FILE [-p N] [-r] [--allow-simulator] MIN_VAL MAX_VAL` prints numbers from its PCG64 stream. `FILE` can be `-` for stdin.
+
 ### `--help`
 
 Prints the generated usage text and exits. `-h` / `--hardware` selects IBM Quantum hardware and requires `-t` / `--runtime`. `-t` stops further jobs after that many reported QPU seconds. It does not cap what IBM bills for the job already submitted.
@@ -213,7 +275,7 @@ Generates N-digit numbers without a manual `[min, max]` range.
 * **Standard mode (`-d N`):** Sets `min_val = 10^(N-1)` and `max_val = 10^N - 1`. For example, `-d 6` generates a number from `100000` to `999999`.
 * **Zero-padded mode (`-d N --pad`):** Sets `min_val = 0` and `max_val = 10^N - 1`, and prints each value as an N-character string with leading zeros. For example, `-d 6 --pad` generates strings from `"000000"` to `"999999"`, such as `"004819"`.
 
-**Do not use `-d` output as production 2FA codes, PINs, seeds, or keys.** The default backend is a simulator PRNG. On hardware, the conditioning assumes a min-entropy that is never measured or health-tested, and output is written to stdout and to plaintext evidence. Production key generation needs a vetted entropy source, continuous health tests, and protected hardware signing keys, none of which `vqrng` provides. Use `-d` for demonstrations, research, and test data.
+**Do not use `-d` output as production 2FA codes, PINs, seeds, or keys.** The default backend is a simulator PRNG. On hardware, the conditioning assumes a min-entropy that is never measured; the health tests only catch gross faults. Output is written to stdout and to plaintext evidence. Production key generation needs an assessed entropy source and protected hardware signing keys, which `vqrng` does not provide. Use `-d` for demonstrations, research, and test data.
 
 ---
 
@@ -240,7 +302,7 @@ print(f"Generated Numbers: {[item['number'] for item in evidence['items']]}")
 print(f"Canonical Pool Hash: {evidence['pool_hash']}")
 ```
 
-If sampling stops before the pool fills, or the CHSH test does not finish, `generate` raises `vqrng.GenerationError`. Its `evidence` attribute holds the payload measured so far:
+If sampling stops before the pool fills (a health-test failure included), or the CHSH test does not finish, `generate` raises `vqrng.GenerationError`. Its `evidence` attribute holds the payload measured so far. A health-test failure has a `vqrng.EntropyHealthError` as its cause:
 
 ```python
 try:
@@ -257,13 +319,33 @@ The conditioning step is available on its own:
 digest = vqrng.extract_entropy("0110" * 128)  # 32-byte HMAC-SHA256, keyed with b"vqrng-v1-extractor"
 ```
 
-### Offline Verification
+### QSeed
+
+```python
+import vqrng
+
+seed = vqrng.collect_seed(mode="hardware", runtime_limit=30, chsh=False, signing_key=None)
+assert vqrng.verify(seed).is_valid
+
+rng = vqrng.QSeed(seed)                      # PCG64 from seed["seed"]; raises vqrng.QSeedError
+values = rng.integers(1, 100, size=1_000_000)  # inclusive bounds; classical, replayable output
+rng.generator                                # the numpy.random.Generator, for the full NumPy API
+```
+
+`vqrng.QSeed(seed)` refuses a simulator seed unless `allow_simulator=True` is passed.
+
+### Verification
 
 ```python
 import vqrng
 
 # Verify an evidence dictionary or JSON string
-result = vqrng.verify(evidence, trusted_keys=["<PUBLIC_KEY_HEX>"])  # trusted_keys is optional
+result = vqrng.verify(
+    evidence,
+    trusted_keys=["<PUBLIC_KEY_HEX>"],  # optional
+    require_chsh=False,                 # True: a missing CHSH spot-check fails Level C
+    ibm=False,                          # True: also run the live IBM job check (network)
+)
 
 if result.is_valid:
     print("Verification passed")
@@ -275,25 +357,30 @@ for level in result.levels.values():
 
 print(result.level_b_assurance)  # "checksum-only", "signed-untrusted-key", "authentic", or None if Level B failed
 print(result.level_c_passed, result.chsh_s_value)  # e.g. True 2.83 with chsh=True
+print(result.levels.get("IBM"), result.notes)      # present only with ibm=True
 ```
 
 ---
 
 ## Verification Levels & Guarantee Hierarchy
 
-`vqrng` structures verification into three tiers:
+`vqrng` structures verification into three offline tiers, plus an optional online check:
 
 | Level | Name | Description | What It Shows |
 | --- | --- | --- | --- |
-| Level A | Reproducible Conversion | Replays each conditioned candidate through the rejection sampler. | The range conversion was computed correctly and without modulo bias. |
-| Level B | Tamper-Evident Provenance | Recomputes the circuit and payload SHA-256 hashes, re-conditions the raw tape and replays the items from it, and checks any Ed25519 signature over `pool_hash`. | Provides self-consistency checks via canonical SHA-256 hashes and optional asymmetric signature verification. Only a signature from a key you already trust shows who produced the record. |
+| Level A | Reproducible Conversion | Replays each conditioned candidate through the rejection sampler, and checks a QSeed record's `seed` against its bytes. | The range conversion was computed correctly and without modulo bias. |
+| Level B | Tamper-Evident Provenance | Recomputes the circuit and payload SHA-256 hashes, replays the health tests over the raw tape, re-conditions the tape and replays the items from it, and checks any Ed25519 signature over `pool_hash`. | Provides self-consistency checks via canonical SHA-256 hashes and optional asymmetric signature verification. Only a signature from a key you already trust shows who produced the record. |
 | Level C | Near-real-time Spot-Checking Audit | Computes the CHSH value *S* from Bell-test counts recorded with `--chsh`, and checks the runs' backend and timing against the pool. | *S* > 2 physical non-locality consistency check. The reported counts violate the classical bound, and they were taken on the pool's backend within 10 seconds of it. This is not device-independent certification. The pool comes from a separate circuit, and without a trusted signature nothing proves who recorded the counts. |
+| Live IBM check (`--ibm`) | IBM Job Comparison | Loads every job on the tape with your IBM token and compares status, backend, execution window, shots, CHSH counts, and submitted-circuit hashes. | The jobs this token can see still match the evidence, on a non-simulator backend. Not hardware attestation, and not available to anyone who cannot see those jobs. |
 
 ### Limits
 
-* **The conditioning does not create entropy.** HMAC-SHA256 is a vetted conditioning function in NIST SP 800-90B. The 512 → 256 bit ratio assumes at least 0.5 bits of min-entropy per raw bit, and `vqrng` does not estimate or health-test that. A constant or simulated source still gives random-looking, but predictable, output. The fixed public salt makes this a deterministic conditioner, not a seeded extractor in the sense of the Leftover Hash Lemma.
+* **The conditioning does not create entropy.** HMAC-SHA256 is a vetted conditioning function in NIST SP 800-90B. The 512 → 256 bit ratio assumes at least 0.5 bits of min-entropy per raw bit, and `vqrng` does not estimate that. A predictable or simulated source that passes the health tests still gives random-looking, but predictable, output. The fixed public salt makes this a deterministic conditioner, not a seeded extractor in the sense of the Leftover Hash Lemma.
+* **The health tests are a fault alarm.** Their cutoffs use an assumed H<sub>min</sub> = 0.5, not a measured one. There is no SP 800-90B entropy assessment and no restart test, so passing them is not NIST validation.
 * **Level C does not certify the pool.** The Bell circuits run beside the Hadamard circuit that produces the numbers. The locality and detection loopholes are open. The timing check relies on the times the backend reported.
+* **The live IBM check still trusts IBM.** It compares the evidence with IBM's copy of the jobs. It cannot show the qubits behaved honestly, and it fails once IBM no longer keeps a job, so long-term audit needs a trusted signature.
 * **Signatures authenticate, they do not attest.** A trusted signature shows that the key holder produced the record. It says nothing about whether the key holder ran the circuits honestly.
+* **QSeed output is classical.** It is PCG64, replayable by anyone holding the seed record, and not for secrets.
 
 ---
 
@@ -302,6 +389,7 @@ print(result.level_c_passed, result.chsh_s_value)  # e.g. True 2.83 with chsh=Tr
 * **Quantum Framework:** Qiskit 1.x, `qiskit-ibm-runtime`
 * **Simulation Engine:** `qiskit-aer`
 * **Cryptography:** `hmac`, `hashlib` (standard library); Ed25519 verification in pure Python (RFC 8032); signing via optional `cryptography`
+* **QSeed Expander:** NumPy `PCG64`
 * **CLI & Packaging:** `argparse`, `setuptools`, `pyproject.toml`
 * **Language:** Python 3.10+
 

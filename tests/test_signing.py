@@ -11,6 +11,7 @@ import vqrng
 from vqrng import cli, signing
 from vqrng.evidence import payload_hash
 from vqrng.verifier.level_b import check_level_b
+from tests.test_health import alternating
 
 # RFC 8032 section 7.1, tests 1 and 2.
 RFC_VECTORS = [
@@ -23,13 +24,9 @@ KEY = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
 POOL_HASH = "ab" * 32
 
 
-def constant(circuit, shots, budget):
-    return ["1" * circuit.num_clbits] * shots, "fake", 0.0
-
-
 @pytest.fixture
 def signed():
-    return vqrng.generate(1, 6, pool_size=2, signing_key=KEY, _source=constant)
+    return vqrng.generate(1, 6, pool_size=2, signing_key=KEY, _source=alternating)
 
 
 def reseal(evidence, mutate):
@@ -112,7 +109,7 @@ class TestSigningKeys:
 
 class TestLevelBAssurance:
     def test_unsigned_evidence_is_checksum_only(self):
-        result = vqrng.verify(vqrng.generate(1, 6, _source=constant))
+        result = vqrng.verify(vqrng.generate(1, 6, _source=alternating))
         assert result.is_valid and result.level_b_assurance == "checksum-only"
 
     def test_signed_evidence_without_a_trusted_key_is_not_authentic(self, signed):
@@ -132,7 +129,7 @@ class TestLevelBAssurance:
         assert result.levels["B"].errors == [f"public_key {RFC_VECTORS[0][0]} is not one of the trusted keys."]
 
     def test_unsigned_evidence_fails_when_trust_is_required(self):
-        result = vqrng.verify(vqrng.generate(1, 6, _source=constant), trusted_keys=[RFC_VECTORS[0][0]])
+        result = vqrng.verify(vqrng.generate(1, 6, _source=alternating), trusted_keys=[RFC_VECTORS[0][0]])
         assert result.levels["B"].errors == ["the evidence is not signed, but a trusted key is required."]
 
     def test_an_empty_trust_list_requires_nothing(self, signed):
@@ -213,7 +210,7 @@ class TestCli:
 
     @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-be"])
     def test_verify_reads_files_in_common_encodings(self, capsys, tmp_path, encoding):
-        evidence = vqrng.generate(1, 6, _source=constant)
+        evidence = vqrng.generate(1, 6, _source=alternating)
         text = json.dumps(evidence)
         data = text.encode(encoding)
         if encoding == "utf-16-be":

@@ -236,8 +236,17 @@ class TestPolling:
 class TestTiming:
     def test_qpu_time_and_queue_time_come_from_job_metrics(self, ibm):
         ibm.jobs.append(make_job(["0"]))
+        circuit = build_circuit(1)
+        run = IBMBackend(log=lambda message: None).run(circuit, 8, 10)
+        assert run == BackendRun(["0"], "ibm_sherbrooke", 1.5, 12.5, "job-1", None, "2026-09-28T06:00:12.500000+00:00",
+                                 None, ibm_module.circuit_sha256(circuit))
+        assert len(run.isa_sha256) == 64
+
+    def test_an_unexportable_isa_circuit_is_recorded_without_a_hash(self, ibm, monkeypatch):
+        monkeypatch.setattr("qiskit.qasm3.dumps", MagicMock(side_effect=ValueError("custom gate")))
+        ibm.jobs.append(make_job(["0"]))
         run = IBMBackend(log=lambda message: None).run(build_circuit(1), 8, 10)
-        assert run == BackendRun(["0"], "ibm_sherbrooke", 1.5, 12.5, "job-1", None, "2026-09-28T06:00:12.500000+00:00")
+        assert run.isa_sha256 is None and run.bitstrings == ["0"]
 
     def test_charge_time_is_used_when_quantum_seconds_is_absent(self):
         assert ibm_module.quantum_seconds_from_metrics({"usage": {"qpu_charge_time_seconds": 3}}) == 3.0

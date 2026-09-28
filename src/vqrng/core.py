@@ -22,6 +22,10 @@ from vqrng.backends import (
 )
 from vqrng.evidence import (
     EVIDENCE_VERSION,
+    KIND_POOL,
+    KIND_SEED,
+    QSEED_EXPANDER,
+    SEED_BYTES,
     STATUS_COMPLETED,
     STATUS_PARTIAL,
     canonical_json,
@@ -32,6 +36,7 @@ from vqrng.evidence import (
 )
 from vqrng import extractor
 from vqrng.extractor import EXTRACTOR, Conditioner, extract_entropy
+from vqrng.health import EntropyHealthError, HealthMonitor
 from vqrng.quantum.chsh import generate_chsh_circuits, tally_counts
 from vqrng.signing import public_key_hex, sign_pool_hash
 
@@ -45,10 +50,12 @@ BitSource = Callable[
 ]
 
 __all__ = [
+    "EntropyHealthError",
     "GenerationError",
     "bits_for_range",
     "build_circuit",
     "canonical_json",
+    "collect_seed",
     "extract_entropy",
     "format_number",
     "generate",
@@ -96,6 +103,7 @@ class _Sampling:
     error: Exception | None = None
     chsh_pending: dict[str, QuantumCircuit] = field(default_factory=dict)
     chsh_data: dict[str, Any] | None = None
+    health: HealthMonitor = field(default_factory=HealthMonitor)
 
     @property
     def job_ids(self) -> list[str]:
@@ -118,6 +126,7 @@ class _Sampling:
     def record(
         self, job_id: str | None, backend_name: str | None, shots: int, bitstrings: list[str],
         started_at: str | None, finished_at: str | None, error: str | None = None,
+        isa_sha256: str | None = None,
     ) -> None:
         self.tape.append({
             "job_id": job_id,
@@ -126,6 +135,7 @@ class _Sampling:
             "bitstrings": bitstrings,
             "started_at": started_at,
             "finished_at": finished_at,
+            "isa_sha256": isa_sha256,
             "error": error,
         })
 
@@ -139,6 +149,7 @@ class _Sampling:
                 "backend": run.backend_name,
                 "started_at": run.started_at,
                 "finished_at": run.finished_at,
+                "isa_sha256": run.isa_sha256,
             }
             try:
                 data["counts"][setting] = tally_counts(normalize_bitstrings(run.bitstrings, 2))
@@ -191,9 +202,11 @@ def _run_batch(
     try:
         bitstrings = normalize_bitstrings(run.bitstrings, n_bits)
     except ValueError as exc:
-        state.record(run.job_id, run.backend_name, shots, [], run.started_at, run.finished_at, str(exc))
+        state.record(run.job_id, run.backend_name, shots, [], run.started_at, run.finished_at, str(exc),
+                     run.isa_sha256)
         raise
-    state.record(run.job_id, run.backend_name, shots, bitstrings, run.started_at, run.finished_at)
+    state.record(run.job_id, run.backend_name, shots, bitstrings, run.started_at, run.finished_at,
+                 isa_sha256=run.isa_sha256)
     return bitstrings
 
 
@@ -216,6 +229,11 @@ def _fill(
         remaining = state.remaining(runtime_limit, f"after {len(state.items)}/{pool_size} numbers")
         shots = _batch_shots(pool_size - len(state.items), acceptance, n_bits, conditioner)
         raw = _run_batch(state, source, circuit, shots, remaining, n_bits, chsh_shots)
+        state.health.feed("".join(raw))
+        failure = state.health.failure
+        if failure is not None:
+            state.tape[-1]["error"] = failure
+            raise EntropyHealthError(failure)
         for bits in conditioner.feed(raw):
             if len(state.items) == pool_size:
                 break
@@ -278,8 +296,10 @@ def generate(
     """Generate random integers in an inclusive range.
 
     Supply either ``min_val`` and ``max_val``, or ``digits`` (with optional
-    zero-padding via ``pad``). Raw shots are conditioned with HMAC-SHA256
-    (see ``vqrng.extractor``) before rejection sampling. Returns an evidence
+    zero-padding via ``pad``). Each batch of raw shots must pass the
+    continuous health tests (see ``vqrng.health``) before it is conditioned
+    with HMAC-SHA256 (see ``vqrng.extractor``) and rejection-sampled; a failing
+    batch stops sampling and stays on the tape. Returns an evidence
     dictionary whose ``items`` carry each ``number``, its zero-padded or plain
     ``formatted`` string, the accepted conditioned ``bitstring``, and any
     ``rejected`` conditioned bitstrings preceding it. The ``tape`` holds every
@@ -302,9 +322,44 @@ def generate(
     ``signing_key`` is a hex Ed25519 private key seed. When given, the
     evidence gets a ``signature`` over ``pool_hash`` and the ``public_key``.
 
-    Raises ``GenerationError`` if sampling stops before the pool fills, or if
-    the CHSH test does not finish; its ``evidence`` attribute holds the payload.
+    Raises ``GenerationError`` if sampling stops before the pool fills (a
+    health-test failure included), or if the CHSH test does not finish; its
+    ``evidence`` attribute holds the payload.
     """
+    return _build(min_val, max_val, digits, pad, mode, pool_size, runtime_limit, backend,
+                  chsh, chsh_shots, signing_key, _source, KIND_POOL)
+
+
+def collect_seed(
+    mode: str = "aer",
+    runtime_limit: int | None = None,
+    backend: str | BaseBackend | BitSource | None = None,
+    *,
+    chsh: bool = False,
+    chsh_shots: int = CHSH_SHOTS,
+    signing_key: str | None = None,
+    _source: BitSource | None = None,
+) -> dict:
+    """Collect a 32-byte seed for ``vqrng.QSeed``, with the same evidence as ``generate``.
+
+    Runs the usual pipeline (health tests, HMAC conditioning, shot tape,
+    optional CHSH spot-check and signature) for 32 values over [0, 255]. That
+    range is exactly 8 bits, so nothing is rejected, and the values are the
+    seed bytes. The evidence has ``kind == "seed"``, the ``seed`` as hex, and
+    the ``expander`` that ``QSeed`` will use. The seed is in the evidence on
+    purpose: anyone holding it can replay the expanded stream, so it must not
+    be used for secrets. On failure, ``GenerationError.evidence`` has
+    ``seed == None``.
+    """
+    return _build(0, 255, None, False, mode, SEED_BYTES, runtime_limit, backend,
+                  chsh, chsh_shots, signing_key, _source, KIND_SEED)
+
+
+def _build(
+    min_val: int | None, max_val: int | None, digits: int | None, pad: bool, mode: str, pool_size: int,
+    runtime_limit: int | None, backend: str | BaseBackend | BitSource | None, chsh: bool, chsh_shots: int,
+    signing_key: str | None, _source: BitSource | None, kind: str,
+) -> dict:
     low, high = resolve_range(min_val, max_val, digits, pad)
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}.")
@@ -351,6 +406,7 @@ def generate(
 
     evidence = {
         "version": EVIDENCE_VERSION,
+        "kind": kind,
         "generated_at": utc_now(),
         "mode": mode,
         "backend": state.backend_name,
@@ -370,6 +426,7 @@ def generate(
         "n_bits": n_bits,
         "circuit": {"qasm": circuit_qasm, "sha256": sha256_hex(circuit_qasm)},
         "extractor": dict(EXTRACTOR),
+        "health": state.health.summary(),
         "quantum_seconds": state.quantum_seconds,
         "charged_seconds": state.charged_seconds,
         "queue_seconds": state.queue_seconds,
@@ -381,6 +438,10 @@ def generate(
     chsh_data = state.chsh_data
     if chsh_data is not None:
         evidence["chsh_data"] = chsh_data
+    if kind == KIND_SEED:
+        filled = state.error is None
+        evidence["seed"] = bytes(item["number"] for item in state.items).hex() if filled else None
+        evidence["expander"] = QSEED_EXPANDER
     evidence["pool_hash"] = payload_hash(evidence)
     if signing_key is not None:
         evidence["signature"], evidence["public_key"] = sign_pool_hash(signing_key, evidence["pool_hash"])

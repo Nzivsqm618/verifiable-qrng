@@ -21,6 +21,8 @@ class BackendRun:
     means the reported ``quantum_seconds`` are final and are charged as-is.
     ``started_at`` and ``finished_at`` are ISO 8601 UTC times of execution;
     ``None`` lets the caller use the wall-clock time around the call.
+    ``isa_sha256`` is the SHA-256 of the transpiled circuit actually submitted,
+    when the backend transpiles and can serialise it.
     """
 
     bitstrings: list[str]
@@ -31,6 +33,7 @@ class BackendRun:
     charged_seconds: float | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    isa_sha256: str | None = None
 
 
 class BackendJobError(RuntimeError):

@@ -1,8 +1,9 @@
 """Level B verification: the evidence is unaltered and internally consistent.
 
 Recomputes the circuit and payload hashes, checks that the request explains
-the range and the status explains the item count, re-conditions the raw shot
-tape, and replays the items from it. Standard library only, like Level A.
+the range and the status explains the item count, replays the health tests
+over the raw shot tape, re-conditions the tape, and replays the items from it.
+Standard library only, like Level A.
 
 These checks detect edits to a payload, not a payload forged from scratch
 with fresh hashes. Only an Ed25519 signature by a key the verifier already
@@ -16,6 +17,7 @@ from typing import Any
 
 from vqrng.evidence import (
     EVIDENCE_VERSION,
+    KINDS,
     STATUS_COMPLETED,
     STATUS_PARTIAL,
     STATUSES,
@@ -24,6 +26,7 @@ from vqrng.evidence import (
     sha256_hex,
 )
 from vqrng.extractor import EXTRACTOR, Conditioner
+from vqrng.health import HealthMonitor
 from vqrng.signing import verify_signature
 from vqrng.verifier.level_a import _is_int, _parse_bits
 
@@ -128,11 +131,24 @@ def _replay(evidence: dict, shots: list[Any]) -> list[str]:
     return errors
 
 
+def _check_health(evidence: dict, raw: str) -> list[str]:
+    monitor = HealthMonitor()
+    monitor.feed(raw)
+    expected = monitor.summary()
+    recorded = evidence.get("health")
+    if recorded != expected:
+        return [f"health is {recorded!r}, but the raw tape gives {expected!r}."]
+    if monitor.failure is not None and evidence.get("status") != STATUS_PARTIAL:
+        return [f"the raw tape fails a health test, but status is {evidence.get('status')!r}: {monitor.failure}"]
+    return []
+
+
 def _check_tape(evidence: dict) -> list[str]:
     tape = evidence.get("tape")
     if not isinstance(tape, list):
         return ["tape must be a list of job batches."]
     errors: list[str] = []
+    raw: list[str] = []
     shots: list[Any] = []
     job_ids: list[Any] = []
     for position, batch in enumerate(tape):
@@ -140,11 +156,14 @@ def _check_tape(evidence: dict) -> list[str]:
         if not isinstance(bits, list):
             errors.append(f"tape[{position}]: expected an object with a 'bitstrings' list.")
             continue
-        shots.extend(bits)
+        raw.extend(b for b in bits if isinstance(b, str))
+        if batch.get("error") is None:
+            shots.extend(bits)
         if batch.get("job_id") is not None:
             job_ids.append(batch["job_id"])
     if evidence.get("job_ids") != job_ids:
         errors.append(f"job_ids {evidence.get('job_ids')!r} do not match the tape's jobs {job_ids!r}.")
+    errors.extend(_check_health(evidence, "".join(raw)))
     errors.extend(_replay(evidence, shots))
     return errors
 
@@ -184,6 +203,9 @@ def check_level_b(evidence: Any, trusted_keys: Iterable[str] | None = None) -> t
     version = evidence.get("version")
     if version != EVIDENCE_VERSION:
         errors.append(f"version is {version!r}, expected {EVIDENCE_VERSION!r}.")
+    kind = evidence.get("kind")
+    if kind not in KINDS:
+        errors.append(f"kind is {kind!r}, expected one of {KINDS}.")
     extractor = evidence.get("extractor")
     if extractor != EXTRACTOR:
         errors.append(f"extractor is {extractor!r}, expected {EXTRACTOR!r}.")

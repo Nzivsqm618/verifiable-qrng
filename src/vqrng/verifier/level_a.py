@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vqrng.evidence import STATUS_PARTIAL
+from vqrng.evidence import KIND_SEED, QSEED_EXPANDER, SEED_BYTES, STATUS_COMPLETED, STATUS_PARTIAL
 
 
 def expected_bits(range_size: int) -> int:
@@ -143,5 +143,28 @@ def verify_level_a(evidence: dict) -> tuple[bool, list[str]]:
 
     for position, item in enumerate(items):
         errors.extend(_verify_item(position, item, min_val, range_size, n_bits, digits, pad))
+    if evidence.get("kind") == KIND_SEED:
+        errors.extend(_verify_seed(evidence, min_val, max_val, items))
 
     return not errors, errors
+
+
+def _verify_seed(evidence: dict, min_val: int, max_val: int, items: list[Any]) -> list[str]:
+    """A seed record is SEED_BYTES values over [0, 255]; ``seed`` is those bytes as hex."""
+    if (min_val, max_val) != (0, 255):
+        return [f"a seed record must use the range [0, 255], got [{min_val}, {max_val}]."]
+    errors: list[str] = []
+    if evidence.get("expander") != QSEED_EXPANDER:
+        errors.append(f"expander is {evidence.get('expander')!r}, expected {QSEED_EXPANDER!r}.")
+    seed = evidence.get("seed")
+    if evidence.get("status") != STATUS_COMPLETED:
+        if seed is not None:
+            errors.append("seed must be null in a partial seed record.")
+        return errors
+    numbers = [item.get("number") if isinstance(item, dict) else None for item in items]
+    if len(numbers) != SEED_BYTES or not all(_is_int(n) and 0 <= n <= 255 for n in numbers):
+        return errors + [f"a completed seed record needs {SEED_BYTES} byte values, got {len(numbers)} items."]
+    expected = bytes(numbers).hex()
+    if seed != expected:
+        errors.append(f"seed is {seed!r}, but the items give {expected!r}.")
+    return errors

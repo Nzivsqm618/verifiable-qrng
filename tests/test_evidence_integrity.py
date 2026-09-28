@@ -63,12 +63,13 @@ class TestShotTape:
         started, finished = batch.pop("started_at"), batch.pop("finished_at")
         assert batch == {
             "job_id": None, "backend": "fake", "shots": 8,
-            "bitstrings": ["111", "010", "101", "110", "000", "100", "011", "001"], "error": None,
+            "bitstrings": ["111", "010", "101", "110", "000", "100", "011", "001"],
+            "isa_sha256": None, "error": None,
         }
         assert parse_timestamp(started) <= parse_timestamp(finished)
         assert evidence["status"] == "completed"
         assert evidence["error"] is None
-        assert evidence["version"] == "3"
+        assert evidence["version"] == "4"
 
     def test_pool_hash_commits_to_the_tail(self, evidence):
         evidence["tape"][0]["bitstrings"][-1] = "011"
@@ -183,7 +184,7 @@ class TestLevelB:
         (lambda e: e["circuit"].update(sha256="0" * 64), "circuit.sha256 does not match"),
         (lambda e: e["circuit"].update(qasm=e["circuit"]["qasm"] + "\nx q[0];"), "circuit.sha256 does not match"),
         (lambda e: e.pop("circuit"), "circuit.qasm is missing."),
-        (lambda e: e.update(version="2"), "version is '2', expected '3'."),
+        (lambda e: e.update(version="3"), "version is '3', expected '4'."),
         (lambda e: e["extractor"].update(input_bits=256), "extractor is {"),
         (lambda e: e.pop("extractor"), "extractor is None"),
         (lambda e: e.pop("request"), "request is missing."),
@@ -231,7 +232,11 @@ class TestLevelB:
         assert errors == ["items do not replay from the conditioned shot tape; first difference at candidate 2."]
 
     def test_partial_tail_must_be_all_rejects(self, partial):
-        ok, errors = edited(partial, lambda e: e["tape"][0]["bitstrings"].append("001"))
+        def mutate(e):
+            e["tape"][0]["bitstrings"].append("001")
+            e["health"]["bits"] += 3
+
+        ok, errors = edited(partial, mutate)
         assert not ok
         assert errors == [
             "conditioned candidate 2 decodes to 1, within range size 5; a partial run would have accepted it."

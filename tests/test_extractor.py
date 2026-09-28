@@ -20,6 +20,7 @@ from vqrng.extractor import (
     extract_entropy,
 )
 from vqrng.verifier.level_b import verify_level_b
+from tests.test_health import alternating
 
 
 def counter_bits(count, width=EXTRACTOR_INPUT_BITS):
@@ -27,11 +28,8 @@ def counter_bits(count, width=EXTRACTOR_INPUT_BITS):
     return [format(i, f"0{width}b") for i in range(count)]
 
 
-def constant(bit):
-    def source(circuit, shots, budget):
-        return [bit * circuit.num_clbits] * shots, "fake", 0.0
-
-    return source
+def alternating_bits(shots):
+    return [str(i % 2) for i in range(shots)]
 
 
 class TestExtractEntropy:
@@ -93,7 +91,7 @@ class TestConditioner:
         assert Conditioner(8).feed(shots) == Conditioner(8).feed([joined[:700], joined[700:]])
 
     def test_evidence_records_the_extractor(self):
-        evidence = vqrng.generate(1, 6, _source=constant("1"))
+        evidence = vqrng.generate(1, 6, _source=alternating)
         assert evidence["extractor"] == EXTRACTOR == {
             "name": "hmac-sha256", "salt": b"vqrng-v1-extractor".hex(), "input_bits": 512, "output_bits": 256,
         }
@@ -101,17 +99,18 @@ class TestConditioner:
 
 class TestEndToEnd:
     def test_items_come_from_the_conditioned_stream_not_the_raw_bits(self):
-        evidence = vqrng.generate(1, 100, pool_size=5, _source=constant("0"))
+        evidence = vqrng.generate(1, 100, pool_size=5, _source=alternating)
         raw = [bits for batch in evidence["tape"] for bits in batch["bitstrings"]]
-        assert set(raw) == {"0000000"}
+        assert set(raw) == {"0101010", "1010101"}
         assert len(raw) * 7 >= EXTRACTOR_INPUT_BITS
         assert len({item["number"] for item in evidence["items"]}) > 1
         assert vqrng.verify(evidence).is_valid
 
     def test_conditioning_cannot_create_entropy(self):
-        # A constant source still yields the same "random-looking" pool every time.
-        first = vqrng.generate(1, 100, pool_size=5, _source=constant("0"))
-        second = vqrng.generate(1, 100, pool_size=5, _source=constant("0"))
+        # A predictable source that passes the health tests still yields the
+        # same "random-looking" pool every time.
+        first = vqrng.generate(1, 100, pool_size=5, _source=alternating)
+        second = vqrng.generate(1, 100, pool_size=5, _source=alternating)
         assert [i["number"] for i in first["items"]] == [i["number"] for i in second["items"]]
 
     def test_aer_pool_verifies_with_real_conditioning(self):
@@ -122,16 +121,16 @@ class TestEndToEnd:
         assert sum(batch["shots"] for batch in evidence["tape"]) * 20 >= EXTRACTOR_INPUT_BITS
 
     def test_one_flipped_raw_bit_breaks_the_replay(self):
-        evidence = vqrng.generate(1, 100, pool_size=3, _source=constant("0"))
+        evidence = vqrng.generate(1, 100, pool_size=3, _source=alternating)
         edited = copy.deepcopy(evidence)
-        edited["tape"][0]["bitstrings"][0] = "0000001"
+        edited["tape"][0]["bitstrings"][0] = "1101010"
         edited["pool_hash"] = payload_hash(edited)
         ok, errors = verify_level_b(edited)
         assert not ok
-        assert errors == ["items do not replay from the conditioned shot tape; first difference at candidate 0."]
+        assert errors[-1] == "items do not replay from the conditioned shot tape; first difference at candidate 0."
 
     def test_items_consistent_with_level_a_but_not_the_tape_fail_level_b(self):
-        forged = vqrng.generate(0, 1, pool_size=2, _source=constant("1"))
+        forged = vqrng.generate(0, 1, pool_size=2, _source=alternating)
         first = forged["items"][0]
         first["bitstring"] = "0" if first["bitstring"] == "1" else "1"
         first["number"] = int(first["bitstring"])
@@ -144,7 +143,7 @@ class TestEndToEnd:
         ]
 
     def test_zero_n_bits_leaves_the_replay_to_level_a(self):
-        evidence = vqrng.generate(0, 1, _source=constant("1"))
+        evidence = vqrng.generate(0, 1, _source=alternating)
         evidence["n_bits"] = 0
         evidence["pool_hash"] = payload_hash(evidence)
         assert verify_level_b(evidence) == (True, [])
@@ -168,7 +167,7 @@ class TestBackendRunMany:
                 raise AssertionError("run_many is overridden")
 
             def run_many(self, circuits, budget):
-                return [(["1"] * shots, "tuple-qpu", 0.5) for _, shots in circuits]
+                return [(alternating_bits(shots), "tuple-qpu", 0.5) for _, shots in circuits]
 
         evidence = vqrng.generate(0, 1, backend=Tuples())
         batch = evidence["tape"][0]
@@ -179,7 +178,7 @@ class TestBackendRunMany:
     def test_reported_times_are_kept(self):
         class Timed(BaseBackend):
             def run(self, circuit, shots, budget):
-                return BackendRun(["0"] * shots, "timed", started_at="2026-09-28T06:00:00+00:00",
+                return BackendRun(alternating_bits(shots), "timed", started_at="2026-09-28T06:00:00+00:00",
                                   finished_at="2026-09-28T06:00:02+00:00")
 
         batch = vqrng.generate(0, 1, backend=Timed())["tape"][0]

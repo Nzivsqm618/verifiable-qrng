@@ -38,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="vqrng",
         description="Generate verifiable quantum random integers.",
+        epilog="Subcommands: 'vqrng verify' checks evidence; 'vqrng seed' and 'vqrng expand' collect a "
+               "seed and expand it locally with PCG64 (classical output, not for secrets). "
+               "Run each with --help.",
         add_help=False,
     )
     parser.add_argument("min_val", metavar="MIN_VAL", type=int, nargs="?", help="Inclusive lower bound.")
@@ -156,12 +159,20 @@ def _restore_runtime_logs(previous_env: str | None, previous_level: int) -> None
 
 
 def build_verify_parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="vqrng verify", description="Verify a vqrng JSON evidence payload offline.")
+    parser = _Parser(
+        prog="vqrng verify",
+        description="Verify a vqrng JSON evidence payload. Levels A-C run offline; --ibm also contacts IBM.",
+    )
     parser.add_argument("file", metavar="FILE", nargs="?",
                         help="Evidence JSON file. Omit to read JSON piped on stdin.")
     parser.add_argument("--trusted-key", metavar="HEX", action="append", dest="trusted_keys",
                         help="Hex Ed25519 public key you trust. Repeatable. When given, Level B "
                              "fails unless the evidence is signed by one of these keys.")
+    parser.add_argument("--require-chsh", action="store_true",
+                        help="Fail Level C when the evidence has no CHSH data, instead of skipping it.")
+    parser.add_argument("--ibm", action="store_true",
+                        help="Also compare the evidence with the IBM jobs it names, using IBMQ_API_TOKEN "
+                             "or QISKIT_IBM_TOKEN. Shows those jobs still match; not hardware attestation.")
     return parser
 
 
@@ -203,11 +214,7 @@ def verify_main(argv: Sequence[str]) -> int:
         return EXIT_OK
 
     try:
-        if args.file is None or args.file == "-":
-            text = sys.stdin.read()
-        else:
-            with open(args.file, "rb") as handle:
-                text = _decode(handle.read())
+        text = _read_input(args.file)
     except (OSError, UnicodeDecodeError) as exc:
         _write(sys.stderr, f"vqrng verify: error: {exc}")
         return EXIT_ERROR
@@ -215,10 +222,13 @@ def verify_main(argv: Sequence[str]) -> int:
         _write(sys.stderr, "vqrng verify: interrupted.")
         return EXIT_ERROR
 
-    result = vqrng.verify(text, trusted_keys=args.trusted_keys)
+    result = vqrng.verify(text, trusted_keys=args.trusted_keys, require_chsh=args.require_chsh, ibm=args.ibm)
     for level in result.levels.values():
         if level.level == "C" and level.status != "skipped":
             line = _chsh_line(level, result.chsh_s_value)
+        elif level.level == "IBM":
+            note = " (this token's jobs match the evidence; not hardware attestation)" if level.passed else ""
+            line = f"{_LEVEL_LABELS[level.status]}: {level.name}{note}"
         else:
             suffix = ""
             if level.status == "skipped":
@@ -229,6 +239,8 @@ def verify_main(argv: Sequence[str]) -> int:
         _write(sys.stdout, line)
         for error in level.errors:
             _write(sys.stdout, f"  - {error}")
+    for note in result.notes:
+        _write(sys.stdout, f"NOTE: {note}")
     if result.evidence_status == "partial":
         _write(sys.stdout, "NOTE: partial evidence; generation stopped before the pool filled.")
     return EXIT_OK if result.is_valid else EXIT_ERROR
@@ -249,11 +261,143 @@ def _report_partial(exc: vqrng.GenerationError, as_json: bool) -> None:
         _write(sys.stderr, "vqrng: partial evidence was not printed; pass -j/--json to keep it.")
 
 
+def _warn_billing(runtime: int) -> None:
+    _write(
+        sys.stderr,
+        f"vqrng: warning: -t {runtime} does not cap what IBM bills. A job can use more "
+        f"than {runtime}s of QPU time, and that time is charged. -t only stops vqrng "
+        "from submitting another job. vqrng does not set an execution-time limit on the "
+        "job: IBM cancels the job when that limit trips and still charges the time used.",
+    )
+
+
+def _read_sign_key(path: str | None) -> str | None:
+    if path is None:
+        return None
+    with open(path, "rb") as handle:
+        return _decode(handle.read()).strip()
+
+
+def _read_input(path: str | None) -> str:
+    if path is None or path == "-":
+        return sys.stdin.read()
+    with open(path, "rb") as handle:
+        return _decode(handle.read())
+
+
+def build_seed_parser() -> argparse.ArgumentParser:
+    parser = _Parser(
+        prog="vqrng seed",
+        description="Collect a 32-byte seed for 'vqrng expand' and print its evidence as canonical JSON. "
+                    "Anyone holding the evidence can replay the expanded stream.",
+        add_help=False,
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("-s", "--simulator", dest="mode", action="store_const", const="aer",
+                      help="Seed from the local Aer simulator, itself a PRNG (testing only).")
+    mode.add_argument("-h", "--hardware", dest="mode", action="store_const", const="hardware",
+                      help="Seed from IBM Quantum hardware (requires --runtime).")
+    parser.add_argument("-t", "--runtime", type=_positive_int, metavar="INTEGER",
+                        help="With -h/--hardware, stop submitting further jobs after this many "
+                             "reported QPU seconds. Not an IBM cap: one job can cost more.")
+    parser.add_argument("--backend", metavar="NAME",
+                        help="With -h/--hardware, run on this IBM QPU instead of the least busy one.")
+    parser.add_argument("--chsh", action="store_true",
+                        help="Also run the CHSH spot-check in the seed job.")
+    parser.add_argument("--sign-key", metavar="FILE",
+                        help="Sign pool_hash with the hex Ed25519 private key seed in FILE.")
+    parser.add_argument("--help", action="help", help="Show this message and exit.")
+    return parser
+
+
+def seed_main(argv: Sequence[str]) -> int:
+    try:
+        args = build_seed_parser().parse_args(argv)
+        if args.mode == "hardware" and args.runtime is None:
+            raise UsageError("-t/--runtime is required with -h/--hardware")
+        if args.backend is not None and args.mode != "hardware":
+            raise UsageError("--backend requires -h/--hardware")
+    except UsageError as exc:
+        _write(sys.stderr, f"vqrng seed: error: {exc}")
+        return EXIT_ERROR
+
+    _write(sys.stderr, f"vqrng: collecting a 32-byte seed on {args.mode}")
+    if args.mode == "hardware":
+        _warn_billing(args.runtime)
+    else:
+        _write(sys.stderr, "vqrng: warning: the simulator is a PRNG; expanding this seed needs --allow-simulator.")
+    try:
+        signing_key = _read_sign_key(args.sign_key)
+    except (OSError, UnicodeDecodeError) as exc:
+        _write(sys.stderr, f"vqrng seed: error: cannot read --sign-key: {exc}")
+        return EXIT_ERROR
+
+    previous_env, previous_level = _quiet_runtime_logs()
+    try:
+        evidence = vqrng.collect_seed(mode=args.mode, runtime_limit=args.runtime, backend=args.backend,
+                                      chsh=args.chsh, signing_key=signing_key)
+    except KeyboardInterrupt:
+        _write(sys.stderr, "vqrng seed: interrupted.")
+        return EXIT_ERROR
+    except vqrng.GenerationError as exc:
+        _write(sys.stderr, f"vqrng seed: error: {exc}")
+        _write(sys.stdout, render(exc.evidence, True, False))
+        return EXIT_ERROR
+    except Exception as exc:
+        _write(sys.stderr, f"vqrng seed: error: {exc}")
+        return EXIT_ERROR
+    finally:
+        _restore_runtime_logs(previous_env, previous_level)
+    _write(sys.stdout, render(evidence, True, False))
+    return EXIT_OK
+
+
+def build_expand_parser() -> argparse.ArgumentParser:
+    parser = _Parser(
+        prog="vqrng expand",
+        description="Print integers from a local PCG64 stream seeded by a 'vqrng seed' record. "
+                    "The numbers are classical and replayable by anyone with the record: not for secrets.",
+        add_help=False,
+    )
+    parser.add_argument("file", metavar="FILE", help="Seed evidence JSON file, or - for stdin.")
+    parser.add_argument("min_val", metavar="MIN_VAL", type=int, help="Inclusive lower bound.")
+    parser.add_argument("max_val", metavar="MAX_VAL", type=int, help="Inclusive upper bound.")
+    parser.add_argument("-p", "--pool", type=_positive_int, default=1, metavar="INTEGER",
+                        help="Number of values to print (default: 1).")
+    parser.add_argument("-r", "--raw", action="store_true", help="Print numbers space-separated on one line.")
+    parser.add_argument("--allow-simulator", action="store_true",
+                        help="Expand a seed collected on the simulator (itself a PRNG).")
+    parser.add_argument("--help", action="help", help="Show this message and exit.")
+    return parser
+
+
+def expand_main(argv: Sequence[str]) -> int:
+    try:
+        args = build_expand_parser().parse_args(argv)
+        if args.min_val > args.max_val:
+            raise UsageError(f"MIN_VAL ({args.min_val}) must be <= MAX_VAL ({args.max_val})")
+    except UsageError as exc:
+        _write(sys.stderr, f"vqrng expand: error: {exc}")
+        return EXIT_ERROR
+    try:
+        rng = vqrng.QSeed(_read_input(args.file), allow_simulator=args.allow_simulator)
+        values = rng.integers(args.min_val, args.max_val, size=args.pool)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        _write(sys.stderr, f"vqrng expand: error: {exc}")
+        return EXIT_ERROR
+    _write(sys.stdout, (" " if args.raw else "\n").join(map(str, values.tolist())))
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["verify"]:
         return verify_main(argv[1:])
+    if argv[:1] == ["seed"]:
+        return seed_main(argv[1:])
+    if argv[:1] == ["expand"]:
+        return expand_main(argv[1:])
     try:
         args = parse_args(argv)
     except UsageError as exc:
@@ -263,21 +407,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _write(sys.stderr, f"vqrng: generating {args.pool} value(s) on {args.mode}")
     if args.mode == "hardware":
-        _write(
-            sys.stderr,
-            f"vqrng: warning: -t {args.runtime} does not cap what IBM bills. A job can use more "
-            f"than {args.runtime}s of QPU time, and that time is charged. -t only stops vqrng "
-            "from submitting another job. vqrng does not set an execution-time limit on the "
-            "job: IBM cancels the job when that limit trips and still charges the time used.",
-        )
-    signing_key = None
-    if args.sign_key is not None:
-        try:
-            with open(args.sign_key, "rb") as handle:
-                signing_key = _decode(handle.read()).strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            _write(sys.stderr, f"vqrng: error: cannot read --sign-key: {exc}")
-            return EXIT_ERROR
+        _warn_billing(args.runtime)
+    try:
+        signing_key = _read_sign_key(args.sign_key)
+    except (OSError, UnicodeDecodeError) as exc:
+        _write(sys.stderr, f"vqrng: error: cannot read --sign-key: {exc}")
+        return EXIT_ERROR
 
     previous_env, previous_level = _quiet_runtime_logs()
     try:

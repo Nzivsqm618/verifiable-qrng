@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from vqrng.backends.base import BackendJobError, BackendRun, BaseBackend, normalize_bitstrings
+from vqrng.evidence import sha256_hex
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -107,14 +108,30 @@ def _measured_register(data: Any, name: str) -> Any:
     raise ValueError(f"result has no classical register named {name!r}")
 
 
-def extract_bitstrings(pub_result: Any, circuit: QuantumCircuit) -> list[str]:
-    """Read the measured register of a SamplerV2 pub result as fixed-width bitstrings.
+def read_bitstrings(pub_result: Any, register_name: str, width: int) -> list[str]:
+    """Read one classical register of a SamplerV2 pub result as ``width``-bit strings.
 
     Looks the register up by name, falling back to the only register present,
     since transpilation and result formats do not always keep the name.
     """
-    register = _measured_register(pub_result.data, circuit.cregs[0].name)
-    return normalize_bitstrings(register.get_bitstrings(), circuit.num_clbits)
+    register = _measured_register(pub_result.data, register_name)
+    return normalize_bitstrings(register.get_bitstrings(), width)
+
+
+def extract_bitstrings(pub_result: Any, circuit: QuantumCircuit) -> list[str]:
+    """Read the measured register of a SamplerV2 pub result as fixed-width bitstrings."""
+    return read_bitstrings(pub_result, circuit.cregs[0].name, circuit.num_clbits)
+
+
+def circuit_sha256(circuit: Any) -> str | None:
+    """SHA-256 of a circuit's OpenQASM 3 text, or ``None`` if it cannot be exported."""
+    from qiskit import qasm3
+
+    try:
+        text = qasm3.dumps(circuit)
+    except Exception:
+        return None
+    return sha256_hex(text)
 
 
 class IBMBackend(BaseBackend):
@@ -175,7 +192,9 @@ class IBMBackend(BaseBackend):
 
         backend = self._select_backend(max(circuit.num_qubits for circuit, _ in circuits))
         pass_manager = generate_preset_pass_manager(optimization_level=1, backend=backend)
-        pubs = [(pass_manager.run(circuit), None, shots) for circuit, shots in circuits]
+        isa_circuits = [pass_manager.run(circuit) for circuit, _ in circuits]
+        isa_hashes = [circuit_sha256(isa) for isa in isa_circuits]
+        pubs = [(isa, None, shots) for isa, (_, shots) in zip(isa_circuits, circuits)]
         sampler = SamplerV2(mode=backend)
         # Leave max_execution_time unset. IBM cancels the job when that limit
         # trips and still bills the QPU time already used, so the option spends
@@ -240,10 +259,12 @@ class IBMBackend(BaseBackend):
         )
         first = BackendRun(
             measured[0], backend.name, quantum_seconds, queue_seconds, job_id, charged_seconds,
-            started_at, finished_at,
+            started_at, finished_at, isa_hashes[0],
         )
         rest = replace(first, quantum_seconds=0.0, queue_seconds=0.0, charged_seconds=None)
-        return [first] + [replace(rest, bitstrings=bits) for bits in measured[1:]]
+        return [first] + [
+            replace(rest, bitstrings=bits, isa_sha256=digest) for bits, digest in zip(measured[1:], isa_hashes[1:])
+        ]
 
     def _cancel(self, job: Any, job_id: str) -> None:
         try:

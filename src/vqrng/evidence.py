@@ -10,10 +10,18 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-EVIDENCE_VERSION = "3"
+EVIDENCE_VERSION = "4"
 STATUS_COMPLETED = "completed"
 STATUS_PARTIAL = "partial"
 STATUSES = (STATUS_COMPLETED, STATUS_PARTIAL)
+
+# A "pool" record carries the numbers themselves. A "seed" record is a pool
+# of SEED_BYTES values over [0, 255], whose bytes seed a local QSEED_EXPANDER.
+KIND_POOL = "pool"
+KIND_SEED = "seed"
+KINDS = (KIND_POOL, KIND_SEED)
+SEED_BYTES = 32
+QSEED_EXPANDER = "numpy.random.PCG64"
 
 # Added after pool_hash is computed, so the hash cannot cover them.
 UNHASHED_FIELDS = ("pool_hash", "signature", "public_key")

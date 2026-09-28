@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from vqrng import extractor
+from vqrng import extractor, health
 
 
 @pytest.fixture
@@ -12,12 +12,15 @@ def passthrough_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
     """Condition every raw bit to itself, so a test can choose the sampled candidates.
 
     Only the HMAC step is replaced; the conditioned stream, its replay in
-    Level B, and rejection sampling run as usual. tests/test_extractor.py
-    covers the real conditioning end to end.
+    Level B, and rejection sampling run as usual. The health-test cutoffs are
+    raised out of reach, since chosen candidates are rarely a healthy stream.
+    tests/test_extractor.py and tests/test_health.py cover the real steps.
     """
     monkeypatch.setattr(extractor, "EXTRACTOR_INPUT_BITS", 1)
     monkeypatch.setattr(extractor, "EXTRACTOR_OUTPUT_BITS", 1)
     monkeypatch.setattr(extractor, "condition_block", lambda block: block)
+    monkeypatch.setattr(health, "rct_cutoff", lambda h_min: 10**9)
+    monkeypatch.setattr(health, "apt_cutoff", lambda h_min: 10**9)
 
 
 def pytest_addoption(parser: object) -> None:

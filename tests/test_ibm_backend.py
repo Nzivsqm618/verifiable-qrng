@@ -119,31 +119,18 @@ class TestBudgetValidation:
             vqrng.generate(1, 100, mode="hardware")
         ibm.service.assert_not_called()
 
-    @pytest.mark.parametrize(("budget", "expected"), [(300, 300), (2.9, 2), (0.4, 1)])
-    def test_budget_is_passed_as_max_execution_time(self, ibm, budget, expected):
+    @pytest.mark.parametrize("budget", [300, 2.9, 0.4, None])
+    def test_budget_is_not_sent_as_an_ibm_execution_limit(self, ibm, budget):
         ibm.jobs.append(make_job(["0"]))
         IBMBackend(log=lambda message: None).run(build_circuit(1), 8, budget)
-        assert ibm.sampler.options.max_execution_time == expected
-
-    def test_no_budget_leaves_max_execution_time_unset(self, ibm):
-        ibm.jobs.append(make_job(["0"]))
-        IBMBackend(log=lambda message: None).run(build_circuit(1), 8, None)
         assert not hasattr(ibm.sampler.options, "max_execution_time")
 
-    def test_later_batches_get_only_the_remaining_budget(self, ibm):
+    def test_later_batches_stop_on_reported_qpu_time(self, ibm):
         rejected = make_job(["1111111"] * 8, metrics={"usage": {"quantum_seconds": 100}}, job_id="job-1")
         accepted = make_job(["0000101"], metrics={"usage": {"quantum_seconds": 20}}, job_id="job-2")
         ibm.jobs.extend([rejected, accepted])
-        limits = []
-        original = ibm.sampler.run.side_effect
-
-        def record(circuits, shots):
-            limits.append(ibm.sampler.options.max_execution_time)
-            return original(circuits, shots)
-
-        ibm.sampler.run.side_effect = record
         evidence = vqrng.generate(1, 100, mode="hardware", runtime_limit=300)
-        assert limits == [300, 200]
+        assert not hasattr(ibm.sampler.options, "max_execution_time")
         assert evidence["quantum_seconds"] == 120.0
         assert evidence["job_ids"] == ["job-1", "job-2"]
         assert evidence["items"][0]["rejected"] == ["1111111"] * 8
@@ -254,8 +241,8 @@ class TestTiming:
         assert ibm_module.quantum_seconds_from_metrics({"usage": {"qpu_charge_time_seconds": 3}}) == 3.0
 
     @pytest.mark.parametrize("metrics", [{}, {"usage": None}, {"usage": {"quantum_seconds": True}}])
-    def test_missing_usage_counts_as_zero(self, metrics):
-        assert ibm_module.quantum_seconds_from_metrics(metrics) == 0.0
+    def test_missing_usage_is_unknown(self, metrics):
+        assert ibm_module.quantum_seconds_from_metrics(metrics) is None
 
     @pytest.mark.parametrize("timestamps", [
         None, {"created": CREATED}, {"created": 5, "running": RUNNING}, {"created": "soon", "running": RUNNING},
@@ -323,6 +310,149 @@ class TestTiming:
         assert err.endswith("] job job-1 QUEUED\n")
 
 
+class TestPessimisticBudget:
+    def charged(self, ibm, job, budget=10):
+        ibm.jobs.append(job)
+        return IBMBackend(log=lambda message: None).run(build_circuit(1), 8, budget)
+
+    def test_final_usage_is_charged_as_reported(self, ibm):
+        run = self.charged(ibm, make_job(["0"]))
+        assert run.charged_seconds is None
+        assert run.quantum_seconds == 1.5
+
+    def test_unreadable_metrics_charge_the_full_limit(self, ibm):
+        job = make_job(["0"])
+        job.metrics.side_effect = ConnectionError("metadata unavailable")
+        run = self.charged(ibm, job)
+        assert (run.quantum_seconds, run.charged_seconds) == (0.0, 10.0)
+
+    def test_pending_usage_charges_the_full_limit(self, ibm, monkeypatch):
+        monkeypatch.setattr(ibm_module, "USAGE_ATTEMPTS", 2)
+        run = self.charged(ibm, make_job(["0"], metrics={"usage": {"status": "pending", "quantum_seconds": 0.7}}))
+        assert (run.quantum_seconds, run.charged_seconds) == (0.7, 10.0)
+
+    def test_final_usage_without_seconds_charges_the_full_limit(self, ibm):
+        run = self.charged(ibm, make_job(["0"], metrics={"usage": {"status": "completed"}}))
+        assert run.charged_seconds == 10.0
+
+    def test_unknown_usage_without_a_limit_is_not_estimated(self, ibm):
+        run = self.charged(ibm, make_job(["0"], metrics={}), budget=None)
+        assert run.charged_seconds is None
+
+    def test_unknown_usage_stops_the_next_batch_from_reusing_the_budget(self, ibm):
+        job = make_job(["1111111"] * 8)
+        job.metrics.side_effect = ConnectionError("metadata unavailable")
+        ibm.jobs.append(job)
+        with pytest.raises(vqrng.GenerationError, match="budget of 300s exhausted after 0/1") as exc:
+            vqrng.generate(1, 100, mode="hardware", runtime_limit=300)
+        assert ibm.sampler.run.call_count == 1
+        evidence = exc.value.evidence
+        assert evidence["quantum_seconds"] == 0.0
+        assert evidence["charged_seconds"] == 300.0
+        assert evidence["job_ids"] == ["job-1"]
+        assert evidence["tape"][0]["bitstrings"] == ["1111111"] * 8
+
+    def test_failed_job_charges_its_limit(self, ibm):
+        ibm.jobs.append(make_job(["0"], statuses=["QUEUED", "ERROR"]))
+        with pytest.raises(vqrng.BackendJobError) as exc:
+            IBMBackend(log=lambda message: None).run(build_circuit(1), 8, 42.7)
+        assert (exc.value.job_id, exc.value.backend_name, exc.value.charged_seconds) == (
+            "job-1", "ibm_sherbrooke", 42.7,
+        )
+
+    def test_failed_job_without_a_limit_charges_nothing(self, ibm):
+        ibm.jobs.append(make_job(["0"], statuses=["CANCELLED"]))
+        with pytest.raises(vqrng.BackendJobError) as exc:
+            IBMBackend(log=lambda message: None).run(build_circuit(1), 8, None)
+        assert exc.value.charged_seconds == 0.0
+
+
+class TestPartialRecovery:
+    def test_a_failed_second_job_keeps_the_first_jobs_values(self, ibm):
+        # [1, 100] -> 7 bits. Job 1 yields 6 and a pending reject; job 2 errors.
+        ibm.jobs.extend([
+            make_job(["0000101", "1111111"], job_id="job-1"),
+            make_job(["0"], statuses=["QUEUED", "ERROR"], error="backend offline", job_id="job-2"),
+        ])
+        with pytest.raises(vqrng.GenerationError, match="job-2 .* ERROR: backend offline") as exc:
+            vqrng.generate(1, 100, mode="hardware", runtime_limit=300, pool_size=2)
+        evidence = exc.value.evidence
+        assert evidence["status"] == "partial"
+        assert "backend offline" in evidence["error"]
+        assert [item["number"] for item in evidence["items"]] == [6]
+        assert evidence["job_ids"] == ["job-1", "job-2"]
+        assert evidence["tape"][0]["bitstrings"] == ["0000101", "1111111"]
+        assert evidence["tape"][1]["bitstrings"] == []
+        assert "backend offline" in evidence["tape"][1]["error"]
+        assert evidence["charged_seconds"] == 1.5 + 298.5
+        result = vqrng.verify(evidence)
+        assert result.is_valid, result.errors
+        assert result.evidence_status == "partial"
+
+    def test_lost_polling_cancels_the_job_and_keeps_its_id(self, ibm):
+        job = make_job(["0"])
+        job.status.side_effect = ["QUEUED", ConnectionError("network down")]
+        ibm.jobs.append(job)
+        messages = []
+        with pytest.raises(vqrng.BackendJobError, match="could not be polled: network down") as exc:
+            IBMBackend(log=messages.append).run(build_circuit(1), 8, 10)
+        job.cancel.assert_called_once()
+        assert exc.value.job_id == "job-1"
+        assert any("lost track" in message for message in messages)
+
+    def test_a_failed_cancel_is_logged_and_the_original_error_kept(self, ibm):
+        job = make_job(["0"])
+        job.status.side_effect = ConnectionError("network down")
+        job.cancel.side_effect = ConnectionError("still down")
+        ibm.jobs.append(job)
+        messages = []
+        with pytest.raises(vqrng.BackendJobError, match="network down"):
+            IBMBackend(log=messages.append).run(build_circuit(1), 8, 10)
+        assert any("cancel failed (still down)" in message for message in messages)
+
+    def test_unreadable_result_keeps_the_job_id(self, ibm):
+        job = make_job(["0"])
+        job.result.side_effect = ValueError("bad payload")
+        ibm.jobs.append(job)
+        with pytest.raises(vqrng.BackendJobError, match="unreadable result: bad payload") as exc:
+            IBMBackend(log=lambda message: None).run(build_circuit(1), 8, 10)
+        assert exc.value.job_id == "job-1"
+
+
+def register(bitstrings):
+    reg = MagicMock()
+    reg.get_bitstrings.return_value = list(bitstrings)
+    return reg
+
+
+class TestResultNormalization:
+    def test_dropped_leading_zeros_are_restored(self, ibm):
+        ibm.jobs.append(make_job(["101", "0", "1111111"]))
+        run = IBMBackend(log=lambda message: None).run(build_circuit(7), 8, 10)
+        assert run.bitstrings == ["0000101", "0000000", "1111111"]
+
+    @pytest.mark.parametrize("bits", ["11111111", "10x", "", 5])
+    def test_malformed_shots_fail_the_job(self, ibm, bits):
+        ibm.jobs.append(make_job([bits]))
+        with pytest.raises(vqrng.BackendJobError, match="unreadable result: shot 0"):
+            IBMBackend(log=lambda message: None).run(build_circuit(7), 8, 10)
+
+    def test_register_by_attribute(self):
+        data = SimpleNamespace(c=register(["1"]))
+        assert ibm_module.extract_bitstrings(SimpleNamespace(data=data), build_circuit(2)) == ["01"]
+
+    def test_register_under_another_name_when_it_is_the_only_one(self):
+        data = {"meas": register(["10"])}
+        assert ibm_module.extract_bitstrings(SimpleNamespace(data=data), build_circuit(2)) == ["10"]
+
+    @pytest.mark.parametrize("data", [
+        {}, {"a": register(["0"]), "b": register(["1"])}, SimpleNamespace(), {"c": "not a register"},
+    ])
+    def test_missing_register(self, data):
+        with pytest.raises(ValueError, match="no classical register named 'c'"):
+            ibm_module.extract_bitstrings(SimpleNamespace(data=data), build_circuit(1))
+
+
 class TestRejectionSamplingOnHardware:
     def test_explicit_range(self, ibm):
         # [1, 100] -> 7 bits; 127 and 100 are rejected, 5 maps to 6 and 99 maps to 100.
@@ -365,6 +495,7 @@ class TestCli:
         code, out, err = self.run(capsys, "-h", "-t", "300", "1", "100")
         assert code == 0
         assert out == "6\n"
+        assert "warning: -t 300 does not cap what IBM bills" in err
         assert "job job-1 QUEUED" in err
         assert "job job-1 DONE" in err
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from vqrng.evidence import STATUS_PARTIAL
+
 
 def expected_bits(range_size: int) -> int:
     """Return ``ceil(log2(range_size))``, with a floor of one qubit.
@@ -116,7 +118,7 @@ def verify_level_a(evidence: dict) -> tuple[bool, list[str]]:
         errors.append(f"Range min ({min_val}) is greater than max ({max_val}).")
     if not _is_int(n_bits) or n_bits < 1:
         errors.append(f"n_bits must be a positive integer, got {n_bits!r}.")
-    if not isinstance(items, list) or not items:
+    if not isinstance(items, list) or (not items and evidence.get("status") != STATUS_PARTIAL):
         errors.append("Evidence must contain a non-empty 'items' list.")
     if errors:
         return False, errors

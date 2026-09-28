@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import sys
 import time
@@ -10,7 +9,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from vqrng.backends.base import BackendRun, BaseBackend
+from vqrng.backends.base import BackendJobError, BackendRun, BaseBackend, normalize_bitstrings
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -70,13 +69,41 @@ def queue_seconds_from_metrics(metrics: Mapping[str, Any]) -> float | None:
     return max(0.0, (running - created).total_seconds())
 
 
-def quantum_seconds_from_metrics(metrics: Mapping[str, Any]) -> float:
+def quantum_seconds_from_metrics(metrics: Mapping[str, Any]) -> float | None:
+    """Return the reported QPU seconds, or ``None`` when IBM did not report them."""
     usage = metrics.get("usage") or {}
     for key in ("quantum_seconds", "qpu_charge_time_seconds"):
         value = usage.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
-    return 0.0
+    return None
+
+
+def _measured_register(data: Any, name: str) -> Any:
+    register = getattr(data, name, None)
+    if hasattr(register, "get_bitstrings"):
+        return register
+    try:
+        register = data[name]
+    except (KeyError, TypeError):
+        register = None
+    if hasattr(register, "get_bitstrings"):
+        return register
+    values = getattr(data, "values", None)
+    candidates = [r for r in values() if hasattr(r, "get_bitstrings")] if callable(values) else []
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ValueError(f"result has no classical register named {name!r}")
+
+
+def extract_bitstrings(pub_result: Any, circuit: QuantumCircuit) -> list[str]:
+    """Read the measured register of a SamplerV2 pub result as fixed-width bitstrings.
+
+    Looks the register up by name, falling back to the only register present,
+    since transpilation and result formats do not always keep the name.
+    """
+    register = _measured_register(pub_result.data, circuit.cregs[0].name)
+    return normalize_bitstrings(register.get_bitstrings(), circuit.num_clbits)
 
 
 class IBMBackend(BaseBackend):
@@ -128,30 +155,54 @@ class IBMBackend(BaseBackend):
         backend = self._select_backend(circuit.num_qubits)
         isa_circuit = generate_preset_pass_manager(optimization_level=1, backend=backend).run(circuit)
         sampler = SamplerV2(mode=backend)
-        if budget is not None:
-            sampler.options.max_execution_time = max(1, math.floor(budget))
+        # Leave max_execution_time unset. IBM cancels the job when that limit
+        # trips and still bills the QPU time already used, so the option spends
+        # credit and returns no shots. ``budget`` only decides later batches.
 
         submitted = self._clock()
         job = sampler.run([isa_circuit], shots=shots)
         job_id = job.job_id()
         self._log(f"job {job_id} submitted to {backend.name} ({shots} shots)")
 
+        def failed(message: str) -> BackendJobError:
+            # Usage is unknown, so count the whole remaining budget and stop.
+            charged = 0.0 if budget is None else float(budget)
+            return BackendJobError(
+                message, job_id=job_id, backend_name=backend.name, charged_seconds=charged
+            )
+
         try:
             status, running_at = self._poll(job, job_id, submitted)
         except KeyboardInterrupt:
             self._log(f"job {job_id} interrupted; cancelling so it does not use more QPU time")
-            job.cancel()
+            self._cancel(job, job_id)
             raise
+        except Exception as exc:
+            self._log(f"job {job_id}: lost track of the job ({exc}); cancelling so it does not use more QPU time")
+            self._cancel(job, job_id)
+            raise failed(f"IBM job {job_id} on {backend.name} could not be polled: {exc}") from exc
         finished = self._clock()
 
         if status != "DONE":
             detail = job.error_message() if status == "ERROR" else None
             suffix = f": {detail}" if detail else ""
-            raise RuntimeError(f"IBM job {job_id} on {backend.name} ended with status {status}{suffix}")
+            raise failed(f"IBM job {job_id} on {backend.name} ended with status {status}{suffix}")
 
-        bitstrings = job.result()[0].data[circuit.cregs[0].name].get_bitstrings()
-        metrics = self._final_metrics(job, job_id)
-        quantum_seconds = quantum_seconds_from_metrics(metrics)
+        try:
+            bitstrings = extract_bitstrings(job.result()[0], circuit)
+        except Exception as exc:
+            raise failed(f"IBM job {job_id} on {backend.name} returned an unreadable result: {exc}") from exc
+
+        metrics, final = self._final_metrics(job, job_id)
+        reported = quantum_seconds_from_metrics(metrics)
+        quantum_seconds = 0.0 if reported is None else reported
+        charged_seconds: float | None = None
+        if (not final or reported is None) and budget is not None:
+            charged_seconds = max(quantum_seconds, float(budget))
+            self._log(
+                f"job {job_id}: QPU usage is unknown; counting the full {budget:g}s "
+                "budget so no further job is submitted"
+            )
         queue_seconds = queue_seconds_from_metrics(metrics)
         if queue_seconds is None:
             # Without server timestamps, queue time is only known to the poll interval.
@@ -161,7 +212,13 @@ class IBMBackend(BaseBackend):
             f"job {job_id} DONE: {quantum_seconds:.2f}s QPU, {queue_seconds:.1f}s queued, "
             f"{finished - submitted:.1f}s total"
         )
-        return BackendRun(bitstrings, backend.name, quantum_seconds, queue_seconds, job_id)
+        return BackendRun(bitstrings, backend.name, quantum_seconds, queue_seconds, job_id, charged_seconds)
+
+    def _cancel(self, job: Any, job_id: str) -> None:
+        try:
+            job.cancel()
+        except Exception as exc:
+            self._log(f"job {job_id}: cancel failed ({exc}); check it on IBM Quantum")
 
     def _poll(self, job: Any, job_id: str, submitted: float) -> tuple[str, float | None]:
         last_status: str | None = None
@@ -182,17 +239,18 @@ class IBMBackend(BaseBackend):
                 return status, running_at
             self._sleep(self._poll_interval)
 
-    def _final_metrics(self, job: Any, job_id: str) -> Mapping[str, Any]:
+    def _final_metrics(self, job: Any, job_id: str) -> tuple[Mapping[str, Any], bool]:
+        """Return the job metrics and whether IBM has finalised the usage in them."""
         metrics: Mapping[str, Any] = {}
         for attempt in range(USAGE_ATTEMPTS):
             try:
                 metrics = job.metrics() or {}
             except Exception as exc:
-                self._log(f"job {job_id}: could not read job metrics ({exc}); QPU time recorded as 0")
-                return {}
+                self._log(f"job {job_id}: could not read job metrics ({exc})")
+                return {}, False
             if (metrics.get("usage") or {}).get("status") != "pending":
-                return metrics
+                return metrics, True
             if attempt < USAGE_ATTEMPTS - 1:
                 self._sleep(USAGE_RETRY_SECONDS)
         self._log(f"job {job_id}: IBM has not finalised QPU usage yet; recording the partial value")
-        return metrics
+        return metrics, False

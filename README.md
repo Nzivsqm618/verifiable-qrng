@@ -5,33 +5,33 @@
 [![CLI Tool](https://img.shields.io/badge/CLI-vqrng-green.svg)](https://github.com/your-org/vqrng)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An open-source Python library and Unix CLI tool (`vqrng`) for generating unbiased random integers and cryptographically verifiable quantum entropy using Qiskit.
+An open-source Python library and Unix CLI tool (`vqrng`) for generating unbiased random integers from quantum measurements with Qiskit, together with an evidence record that can be audited offline.
 
-`vqrng` bridges the gap between quantum circuit execution and real-world application pipelines, combining **unbiased rejection sampling** with **tamper-evident JSON evidence logging** and optional **Bell's Theorem (CHSH Inequality)** device-independent certification.
+`vqrng` combines **HMAC-SHA256 conditioning**, **unbiased rejection sampling**, **tamper-evident JSON evidence** with optional **Ed25519 signatures**, and an optional **CHSH (Bell inequality) spot-check** run alongside the pool.
 
-**⚠️Status: Work in Progress (Active Development)**  
-This package is currently under heavy development. **Not ready for production use yet!**
+**⚠️ Status: Educational & Research-grade Verifiable QRNG Framework - Not ready for production cryptographic key generation.**
 
 ---
 
 ## Executive Summary & Goals
 
-Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs rely on opaque physical noise or deterministic seed states. `vqrng` provides a complete, dual-interface (SDK + CLI) framework for verifiable quantum randomness:
+Classical Pseudo-Random Number Generators (PRNGs) and unverified Hardware RNGs rely on opaque physical noise or deterministic seed states. `vqrng` is a dual-interface (SDK + CLI) framework for studying verifiable quantum randomness:
 
-* **Unbiased Integer Conversion:** Employs strict rejection sampling (n<sub>bits</sub> = ⌈log<sub>2</sub>(range_size)⌉) to eliminate modulo bias when mapping raw quantum bits to custom integer ranges `[min, max]`.
-* **Tamper-Evident Provenance:** Automatically records raw bitstrings, rejected candidate states, circuit hashes, and canonical SHA-256 pool hashes for offline auditability.
-* **Dual Execution Modes:** Supports local high-speed simulation via `qiskit-aer` and physical quantum processor execution on IBM Quantum QPUs.
-* **Graduated Verification Hierarchy:** Supports basic conversion audits (Level A), canonical hash/provenance validation (Level B), and physical non-locality certification via Bell/CHSH inequality tests (Level C).
+* **Conditioning, then Unbiased Integer Conversion:** Raw measurement bits are conditioned with HMAC-SHA256, then mapped to `[min, max]` by strict rejection sampling (n<sub>bits</sub> = ⌈log<sub>2</sub>(range_size)⌉), so the mapping adds no modulo bias.
+* **Tamper-Evident Provenance:** Records every raw shot, the conditioned candidates, rejected candidates, circuit hashes, and a canonical SHA-256 `pool_hash` for offline auditing. An optional Ed25519 signature ties the record to a key you trust.
+* **Dual Execution Modes:** Local testing with the `qiskit-aer` simulator, and execution on physical IBM Quantum QPUs.
+* **Graduated Verification Hierarchy:** Reproducible conversion (Level A), self-consistency and optional signature checks (Level B), and a near-real-time CHSH spot-check (Level C).
 
 ---
 
 ## Key Features
 
 * **Python SDK & Unix Pipeline CLI:** Import `vqrng` directly inside Python projects or chain `vqrng` in Unix shell pipelines. Stdout is plain numbers by default, one per line. Pass `-r` for one space-separated line, or `-j` for one compact canonical JSON line.
-* **Strict Rejection Sampling:** Guarantees zero modulo bias across any arbitrary `[min, max]` bounds.
+* **HMAC-SHA256 Entropy Conditioning:** Every 512 raw bits are conditioned into 256 output bits before rejection sampling, using only the Python standard library (`hmac`, `hashlib`).
+* **Strict Rejection Sampling:** Maps conditioned bits to any `[min, max]` range with no modulo bias.
 * **QPU Budget Control:** `-t` stops `vqrng` from submitting another IBM job once the reported QPU time is used. It is not a cap IBM enforces, and queue time is recorded separately from QPU time.
-* **Offline Verification Engine:** Includes a built-in verification suite (`vqrng verify`) to audit evidence files and detect post-generation tampering.
-* **CHSH Entanglement Engine:** Optional device-independent entropy verification using non-orthogonal measurement bases (A<sub>0</sub>, A<sub>1</sub>, B<sub>0</sub>, B<sub>1</sub>) to prove *S* > 2 quantum non-locality.
+* **Offline Verification Engine:** `vqrng verify` audits evidence files, detects edits made after generation, and checks signatures against keys you pass with `--trusted-key`.
+* **CHSH Spot-Check:** Optional Bell test with non-orthogonal measurement bases (A<sub>0</sub>, A<sub>1</sub>, B<sub>0</sub>, B<sub>1</sub>), run in the same job as the first pool batch. Level C checks *S* > 2 and that the runs happened within 10 seconds of the pool, on the same backend.
 
 ---
 
@@ -44,7 +44,12 @@ cd vqrng
 
 # Install library and CLI executable in editable mode
 pip install -e .
+
+# Add signing support (Ed25519 via the `cryptography` package)
+pip install -e ".[sign]"
 ```
+
+Verification, including signature checks, needs only the standard library. Only signing needs `cryptography`.
 
 ---
 
@@ -62,6 +67,8 @@ Generate a single random integer between 1 and 100 using Qiskit Aer:
 vqrng -s 1 100
 ```
 
+**The Aer backend (`-s`, the default) is a simulator.** Its "measurements" come from a C++ pseudo-random number generator (PRNG), not a quantum process. Use it for local testing and development only. Its output is not quantum randomness.
+
 ### 2. Generate a Random Pool
 
 Generate a pool of 20 random numbers in the range [1, 1000]:
@@ -78,11 +85,11 @@ Submit to physical IBM QPU hardware, and stop submitting further jobs after 300 
 export IBMQ_API_TOKEN="your_ibm_quantum_api_token"
 vqrng -h -t 300 -p 10 1 100
 
-# N-digit OTP on hardware, pinned to a specific QPU
+# N-digit number on hardware, pinned to a specific QPU
 vqrng -h -t 300 --backend ibm_torino -d 6 --pad
 ```
 
-`vqrng` uses the least busy operational QPU unless `--backend` is given. Job status (`QUEUED`, `RUNNING`, `DONE`, `ERROR`, `CANCELLED`) is reported on stderr with timestamps, so stdout carries only the numbers or JSON. The evidence records `quantum_seconds` (QPU time reported by IBM), `charged_seconds` (what was counted against `-t`), `queue_seconds`, `wall_seconds`, and the IBM `job_ids`. Pressing Ctrl+C while a job is waiting cancels it so it does not use more QPU time.
+`vqrng` uses the least busy operational QPU unless `--backend` is given. Job status (`QUEUED`, `RUNNING`, `DONE`, `ERROR`, `CANCELLED`) is reported on stderr with timestamps, so stdout carries only the numbers or JSON. The evidence records `quantum_seconds` (QPU time reported by IBM), `charged_seconds` (what was counted against `-t`), `queue_seconds`, `wall_seconds`, the IBM `job_ids`, and each job's `started_at` / `finished_at` time. Pressing Ctrl+C while a job is waiting cancels it so it does not use more QPU time.
 
 **`-t` is not an IBM billing cap.** Using `-h` prints a warning. IBM bills the QPU seconds a job actually uses, and one job can cost more than `-t` (a `-t 2` job can be billed 3 seconds). When that happens the evidence sets `"budget_exceeded": true` and `vqrng` warns on stderr. `-t` only stops `vqrng` from submitting a further job once the reported time is used up. `vqrng` does not set IBM's execution-time limit on the job: when that limit trips, IBM cancels the job and still charges the time already used, so the credit is spent and no numbers come back.
 
@@ -99,23 +106,49 @@ vqrng -s -j 1 100
 # Pipeline verification
 vqrng -s -j -p 50 1 1000 | vqrng verify
 
-# File verification
+# File verification (UTF-8, or UTF-16 as written by Windows PowerShell's `>`)
 vqrng verify evidence.json
 ```
 
-`vqrng verify` reports each level separately and exits with status 1 if any level that ran fails. Level C runs only when the evidence was generated with `--chsh`:
+`vqrng verify` reports each level separately and exits with status 1 if any level that ran fails:
 
 ```text
 PASS: Level A (reproducible conversion)
-PASS: Level B (tamper-evident provenance)
-Level C (Physical CHSH Non-locality): PASSED (S = 2.82)
+PASS: Level B (tamper-evident provenance) via checksum only (self-consistent; not authenticated)
+Level C (near-real-time CHSH spot-check): PASSED (S = 2.82)
 ```
 
-Without `--chsh` the last line is `SKIP: Level C (Physical CHSH Non-locality) was not run; the evidence has no chsh_data`.
+Level C runs only when the evidence was generated with `--chsh`. Otherwise its line is `SKIP: Level C (near-real-time CHSH spot-check) was not run; the evidence has no chsh_data`.
 
-The evidence `tape` records every measured shot of every job, including the unused tail of the last batch. `pool_hash` is the SHA-256 of the canonical JSON of the whole payload except `pool_hash` itself. Only evidence format version `"2"` verifies.
+The evidence `tape` records every raw measured shot of every job, including the unused tail of the last batch. `extractor` records the conditioning parameters. Each item's `bitstring` and `rejected` entries are conditioned candidates, and Level B recomputes them from the raw tape. `pool_hash` is the SHA-256 of the canonical JSON of the whole payload except `pool_hash`, `signature`, and `public_key`. Only evidence format version `"3"` verifies.
 
-### 5. N-Digit Tokens (OTP and PIN)
+### 5. Signed Evidence
+
+A checksum only shows that a record is self-consistent. Anyone who edits a record can recompute `pool_hash`. To tie evidence to its producer, sign it with an Ed25519 key, and have verifiers check it against the public key they already trust:
+
+```bash
+# Create a key once, keep signing.key secret, and publish the public key
+python -c "from vqrng.signing import generate_signing_key as g; print(g())" > signing.key
+python -c "from vqrng.signing import public_key_hex as p; print(p(open('signing.key').read()))"
+
+# Sign while generating
+vqrng -j --sign-key signing.key 1 100 > evidence.json
+
+# Authenticate against the published key
+vqrng verify --trusted-key <PUBLIC_KEY_HEX> evidence.json
+```
+
+The payload then carries `signature` and `public_key` (hex). Level B reports one of three outcomes:
+
+| Level B outcome | Meaning |
+| --- | --- |
+| `via checksum only (self-consistent; not authenticated)` | Unsigned. The hashes match, but anyone could have produced the record. |
+| `via Ed25519 signature from an untrusted key` | Validly signed, but by a key carried in the payload itself. A forger can sign with a key of their own, so this is no stronger than a checksum. |
+| `via Ed25519 signature from a trusted key (authentic)` | Signed by a key passed with `--trusted-key`. |
+
+With `--trusted-key`, Level B fails unless the evidence is signed by one of those keys.
+
+### 6. N-Digit Numbers
 
 Generate an N-digit number without setting `MIN_VAL` and `MAX_VAL` by hand:
 
@@ -123,7 +156,7 @@ Generate an N-digit number without setting `MIN_VAL` and `MAX_VAL` by hand:
 # 6-digit number in [100000, 999999]
 vqrng -s -d 6
 
-# Zero-padded 6-character token from "000000" to "999999"
+# Zero-padded 6-character string from "000000" to "999999"
 vqrng -s -d 6 --pad
 ```
 
@@ -135,7 +168,7 @@ vqrng -s -d 6 --pad
 
 Running `vqrng` without `-j` prints only plain random numbers. Supplying `-j` or `--json` prints one compact canonical JSON line (sorted keys, no extra whitespace). That is the same encoding used for `pool_hash`.
 
-Use it for verification logging, cryptographic audit trails, piping into `vqrng verify`, and storing provenance records. `-j` cannot be combined with `-r`.
+Use it for verification logging, audit trails, piping into `vqrng verify`, and storing provenance records. `-j` cannot be combined with `-r`.
 
 ### `-r`, `--raw` (Single-Line Output)
 
@@ -145,28 +178,42 @@ Prints the pool as space-separated values on one line, for example `741829 93820
 vqrng -s -r -p 3 1 100
 ```
 
-### `--chsh` (CHSH Bell Test for Level C)
+### `--chsh` (Near-Real-Time CHSH Spot-Check)
 
-After the pool fills, also runs four Bell-state circuits on the same backend, one per measurement setting (Alice at 0 or π/2, Bob at π/4 or −π/4), 1024 shots each. The outcome counts go into the evidence under `chsh_data`, which `pool_hash` covers:
+Adds four Bell-state circuits, one per measurement setting (Alice at 0 or π/2, Bob at π/4 or −π/4), 1024 shots each, to the **first pool job**. On IBM hardware they are extra circuits in the same Sampler job, so they share its queue slot, calibration, and execution window. `chsh_data` records the outcome counts and, per setting, the job id, backend, and `started_at` / `finished_at` time. `pool_hash` covers all of it:
 
 ```bash
 vqrng --chsh -j 1 100 | vqrng verify
 ```
 
-Level C computes each correlation E = (N<sub>00</sub> + N<sub>11</sub> − N<sub>01</sub> − N<sub>10</sub>) / N and S = |E(A0,B0) + E(A0,B1) + E(A1,B0) − E(A1,B1)|. It passes when S > 2, the classical limit. The quantum maximum is 2√2 ≈ 2.83. On hardware the four circuits are four more IBM jobs, and their QPU time counts against `-t`. If the budget runs out or a job fails before all four finish, the command exits with status 1, and `chsh_data.error` says why.
+Level C computes each correlation E = (N<sub>00</sub> + N<sub>11</sub> − N<sub>01</sub> − N<sub>10</sub>) / N and S = |E(A0,B0) + E(A0,B1) + E(A1,B0) − E(A1,B1)|. It passes when all of the following hold:
+
+* S > 2, the classical limit. The quantum maximum is 2√2 ≈ 2.83.
+* Every CHSH run executed on the same backend as the pool.
+* Every CHSH run executed within 10 seconds of a pool batch. A run with missing or invalid times counts as decoupled and fails.
+
+If the CHSH job fails, the command exits with status 1, and `chsh_data.error` says why.
+
+### `--sign-key FILE`
+
+Signs `pool_hash` with the hex Ed25519 private key seed in `FILE` and adds `signature` and `public_key` to the evidence. It needs `pip install vqrng[sign]`. A bad key is rejected before any job is submitted.
+
+### `vqrng verify --trusted-key HEX`
+
+Trusts the given hex Ed25519 public key. The flag can be repeated. When it is given, Level B passes only for evidence signed by one of these keys, and reports it as authentic.
 
 ### `--help`
 
 Prints the generated usage text and exits. `-h` / `--hardware` selects IBM Quantum hardware and requires `-t` / `--runtime`. `-t` stops further jobs after that many reported QPU seconds. It does not cap what IBM bills for the job already submitted.
 
-### `-d`, `--digits INTEGER` (Quantum OTP and PIN Shortcut)
+### `-d`, `--digits INTEGER` (N-Digit Shortcut)
 
-Generates an N-digit quantum random number or security token without a manual `[min, max]` range.
+Generates N-digit numbers without a manual `[min, max]` range.
 
 * **Standard mode (`-d N`):** Sets `min_val = 10^(N-1)` and `max_val = 10^N - 1`. For example, `-d 6` generates a number from `100000` to `999999`.
-* **Zero-padded mode (`-d N --pad`):** Sets `min_val = 0` and `max_val = 10^N - 1`, and prints each value as an N-character string with leading zeros. For example, `-d 6 --pad` generates tokens from `"000000"` to `"999999"`, such as `"004819"`.
+* **Zero-padded mode (`-d N --pad`):** Sets `min_val = 0` and `max_val = 10^N - 1`, and prints each value as an N-character string with leading zeros. For example, `-d 6 --pad` generates strings from `"000000"` to `"999999"`, such as `"004819"`.
 
-Use it for quantum-safe 2FA OTP codes (Q-OTP), hardware wallet PINs, cryptographic seed codes, and recovery keys.
+**Do not use `-d` output as production 2FA codes, PINs, seeds, or keys.** The default backend is a simulator PRNG. On hardware, the conditioning assumes a min-entropy that is never measured or health-tested, and output is written to stdout and to plaintext evidence. Production key generation needs a vetted entropy source, continuous health tests, and protected hardware signing keys, none of which `vqrng` provides. Use `-d` for demonstrations, research, and test data.
 
 ---
 
@@ -179,19 +226,21 @@ You can also import `vqrng` directly into Python applications.
 ```python
 import vqrng
 
-# Generate a pool of 10 random integers using Qiskit Aer
+# Generate a pool of 10 random integers using Qiskit Aer (a PRNG simulator, for testing)
 evidence = vqrng.generate(
     min_val=1,
     max_val=100,
     mode="aer",
-    pool_size=10
+    pool_size=10,
+    chsh=True,                 # optional CHSH spot-check in the first job
+    signing_key=None,          # optional hex Ed25519 private key seed
 )
 
 print(f"Generated Numbers: {[item['number'] for item in evidence['items']]}")
 print(f"Canonical Pool Hash: {evidence['pool_hash']}")
 ```
 
-If sampling stops before the pool fills, `generate` raises `vqrng.GenerationError`. Its `evidence` attribute holds the partial payload:
+If sampling stops before the pool fills, or the CHSH test does not finish, `generate` raises `vqrng.GenerationError`. Its `evidence` attribute holds the payload measured so far:
 
 ```python
 try:
@@ -200,39 +249,51 @@ except vqrng.GenerationError as exc:
     evidence = exc.evidence  # status == "partial"; accepted values, job ids, and shots so far
 ```
 
-`backend` accepts either an IBM QPU name (hardware mode) or a `vqrng.BaseBackend` instance to run on instead of the default.
+`backend` accepts either an IBM QPU name (hardware mode) or a `vqrng.BaseBackend` instance to run on instead of the default. A backend can override `run_many` to put several circuits in one job.
+
+The conditioning step is available on its own:
+
+```python
+digest = vqrng.extract_entropy("0110" * 128)  # 32-byte HMAC-SHA256, keyed with b"vqrng-v1-extractor"
+```
 
 ### Offline Verification
 
 ```python
 import vqrng
 
-# Verify previously generated evidence dictionary or JSON string
-result = vqrng.verify(evidence)
+# Verify an evidence dictionary or JSON string
+result = vqrng.verify(evidence, trusted_keys=["<PUBLIC_KEY_HEX>"])  # trusted_keys is optional
 
 if result.is_valid:
-    print("✓ Verification Passed: Hash and conversion logic verified!")
+    print("Verification passed")
 else:
-    print(f"✗ Verification Failed: {result.errors}")
+    print(f"Verification failed: {result.errors}")
 
 for level in result.levels.values():
     print(level.level, level.status, level.errors)  # status is "pass", "fail", or "skipped"
 
-# With vqrng.generate(..., chsh=True)
-print(result.level_c_passed, result.chsh_s_value)  # e.g. True 2.83
+print(result.level_b_assurance)  # "checksum-only", "signed-untrusted-key", "authentic", or None if Level B failed
+print(result.level_c_passed, result.chsh_s_value)  # e.g. True 2.83 with chsh=True
 ```
 
 ---
 
 ## Verification Levels & Guarantee Hierarchy
 
-`vqrng` structures verification into three distinct guarantee tiers:
+`vqrng` structures verification into three tiers:
 
-| Level | Name | Description | What It Proves |
+| Level | Name | Description | What It Shows |
 | --- | --- | --- | --- |
-| Level A | Reproducible Conversion | Replays raw measurement bits against the rejection sampling algorithm. | Proves range conversion was computed correctly from raw bits without modulo bias. |
-| Level B | Tamper-Evident Provenance | Audits canonical SHA-256 pool hashes, circuit QASM hashes, and backend IDs. | Proves evidence content has not been altered post-generation under trusted server key models. |
-| Level C | Physical CHSH Non-locality | Computes the CHSH value $S$ from the Bell-test counts recorded with `--chsh`. | Shows the backend's reported counts violate the classical bound ($S > 2$). The numbers themselves come from a separate circuit, and nothing in the evidence rules out forged counts, so this is not device-independent certification of the pool. |
+| Level A | Reproducible Conversion | Replays each conditioned candidate through the rejection sampler. | The range conversion was computed correctly and without modulo bias. |
+| Level B | Tamper-Evident Provenance | Recomputes the circuit and payload SHA-256 hashes, re-conditions the raw tape and replays the items from it, and checks any Ed25519 signature over `pool_hash`. | Provides self-consistency checks via canonical SHA-256 hashes and optional asymmetric signature verification. Only a signature from a key you already trust shows who produced the record. |
+| Level C | Near-real-time Spot-Checking Audit | Computes the CHSH value *S* from Bell-test counts recorded with `--chsh`, and checks the runs' backend and timing against the pool. | *S* > 2 physical non-locality consistency check. The reported counts violate the classical bound, and they were taken on the pool's backend within 10 seconds of it. This is not device-independent certification. The pool comes from a separate circuit, and without a trusted signature nothing proves who recorded the counts. |
+
+### Limits
+
+* **The conditioning does not create entropy.** HMAC-SHA256 is a vetted conditioning function in NIST SP 800-90B. The 512 → 256 bit ratio assumes at least 0.5 bits of min-entropy per raw bit, and `vqrng` does not estimate or health-test that. A constant or simulated source still gives random-looking, but predictable, output. The fixed public salt makes this a deterministic conditioner, not a seeded extractor in the sense of the Leftover Hash Lemma.
+* **Level C does not certify the pool.** The Bell circuits run beside the Hadamard circuit that produces the numbers. The locality and detection loopholes are open. The timing check relies on the times the backend reported.
+* **Signatures authenticate, they do not attest.** A trusted signature shows that the key holder produced the record. It says nothing about whether the key holder ran the circuits honestly.
 
 ---
 
@@ -240,6 +301,7 @@ print(result.level_c_passed, result.chsh_s_value)  # e.g. True 2.83
 
 * **Quantum Framework:** Qiskit 1.x, `qiskit-ibm-runtime`
 * **Simulation Engine:** `qiskit-aer`
+* **Cryptography:** `hmac`, `hashlib` (standard library); Ed25519 verification in pure Python (RFC 8032); signing via optional `cryptography`
 * **CLI & Packaging:** `argparse`, `setuptools`, `pyproject.toml`
 * **Language:** Python 3.10+
 

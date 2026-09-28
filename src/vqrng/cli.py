@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import logging
 import os
 import sys
@@ -70,8 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", metavar="NAME",
                         help="With -h/--hardware, run on this IBM QPU instead of the least busy one.")
     parser.add_argument("--chsh", action="store_true",
-                        help="Also run the 4 CHSH Bell-test circuits and record their counts for "
-                             "Level C. On hardware they are 4 more jobs within -t/--runtime.")
+                        help="Also run the 4 CHSH Bell-test circuits in the first pool job and "
+                             "record their counts and times for Level C.")
+    parser.add_argument("--sign-key", metavar="FILE",
+                        help="Sign pool_hash with the hex Ed25519 private key seed in FILE. "
+                             "Needs the 'cryptography' package.")
 
     parser.add_argument("--help", action="help", help="Show this message and exit.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {vqrng.__version__}")
@@ -155,6 +159,9 @@ def build_verify_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="vqrng verify", description="Verify a vqrng JSON evidence payload offline.")
     parser.add_argument("file", metavar="FILE", nargs="?",
                         help="Evidence JSON file. Omit to read JSON piped on stdin.")
+    parser.add_argument("--trusted-key", metavar="HEX", action="append", dest="trusted_keys",
+                        help="Hex Ed25519 public key you trust. Repeatable. When given, Level B "
+                             "fails unless the evidence is signed by one of these keys.")
     return parser
 
 
@@ -167,6 +174,21 @@ def _chsh_line(level: vqrng.LevelResult, s_value: float | None) -> str:
     verdict = "PASSED" if level.passed else "FAILED"
     detail = "" if s_value is None else f" (S = {s_value:.2f})"
     return f"Level C ({level.name}): {verdict}{detail}"
+
+
+_ASSURANCE_NOTES = {
+    "checksum-only": "via checksum only (self-consistent; not authenticated)",
+    "signed-untrusted-key": "via Ed25519 signature from an untrusted key (self-consistent; "
+                            "pass --trusted-key to authenticate)",
+    "authentic": "via Ed25519 signature from a trusted key (authentic)",
+}
+
+
+def _decode(data: bytes) -> str:
+    """Decode UTF-8, or UTF-16 with a byte-order mark (what Windows PowerShell's ``>`` writes)."""
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16")
+    return data.decode("utf-8-sig")
 
 
 def verify_main(argv: Sequence[str]) -> int:
@@ -184,22 +206,27 @@ def verify_main(argv: Sequence[str]) -> int:
         if args.file is None or args.file == "-":
             text = sys.stdin.read()
         else:
-            with open(args.file, encoding="utf-8") as handle:
-                text = handle.read()
-    except OSError as exc:
+            with open(args.file, "rb") as handle:
+                text = _decode(handle.read())
+    except (OSError, UnicodeDecodeError) as exc:
         _write(sys.stderr, f"vqrng verify: error: {exc}")
         return EXIT_ERROR
     except KeyboardInterrupt:
         _write(sys.stderr, "vqrng verify: interrupted.")
         return EXIT_ERROR
 
-    result = vqrng.verify(text)
+    result = vqrng.verify(text, trusted_keys=args.trusted_keys)
     for level in result.levels.values():
         if level.level == "C" and level.status != "skipped":
-            _write(sys.stdout, _chsh_line(level, result.chsh_s_value))
+            line = _chsh_line(level, result.chsh_s_value)
         else:
-            suffix = " was not run; the evidence has no chsh_data" if level.status == "skipped" else ""
-            _write(sys.stdout, f"{_LEVEL_LABELS[level.status]}: Level {level.level} ({level.name}){suffix}")
+            suffix = ""
+            if level.status == "skipped":
+                suffix = " was not run; the evidence has no chsh_data"
+            elif level.level == "B" and level.passed:
+                suffix = f" {_ASSURANCE_NOTES[result.level_b_assurance]}"  # type: ignore[index]
+            line = f"{_LEVEL_LABELS[level.status]}: Level {level.level} ({level.name}){suffix}"
+        _write(sys.stdout, line)
         for error in level.errors:
             _write(sys.stdout, f"  - {error}")
     if result.evidence_status == "partial":
@@ -243,6 +270,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "from submitting another job. vqrng does not set an execution-time limit on the "
             "job: IBM cancels the job when that limit trips and still charges the time used.",
         )
+    signing_key = None
+    if args.sign_key is not None:
+        try:
+            with open(args.sign_key, "rb") as handle:
+                signing_key = _decode(handle.read()).strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            _write(sys.stderr, f"vqrng: error: cannot read --sign-key: {exc}")
+            return EXIT_ERROR
+
     previous_env, previous_level = _quiet_runtime_logs()
     try:
         try:
@@ -256,6 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime_limit=args.runtime,
                 backend=args.backend,
                 chsh=args.chsh,
+                signing_key=signing_key,
             )
         except KeyboardInterrupt:
             _write(sys.stderr, "vqrng: interrupted.")

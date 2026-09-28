@@ -6,6 +6,8 @@ from qiskit_ibm_runtime.exceptions import IBMBackendValueError, RuntimeJobFailur
 import vqrng
 from vqrng.backends import BackendRun
 
+pytestmark = pytest.mark.usefixtures("passthrough_extractor")
+
 
 def overrun(circuit, shots, budget):
     assert budget == 2

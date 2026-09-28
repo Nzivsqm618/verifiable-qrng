@@ -5,6 +5,8 @@ import pytest
 import vqrng
 from vqrng.core import bits_for_range, canonical_json, sha256_hex
 
+pytestmark = pytest.mark.usefixtures("passthrough_extractor")
+
 
 def fake_source(values):
     """Bit source that replays ``values`` as fixed-width bitstrings."""

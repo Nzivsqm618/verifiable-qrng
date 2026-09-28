@@ -9,9 +9,11 @@ import pytest
 import vqrng
 from vqrng import cli
 from vqrng.backends import BackendJobError, BackendRun, BaseBackend
-from vqrng.evidence import payload_hash
+from vqrng.evidence import parse_timestamp, payload_hash
 from vqrng.verifier.level_b import verify_level_b
 from tests.test_generate import fake_source
+
+pytestmark = pytest.mark.usefixtures("passthrough_extractor")
 
 
 def rehash(evidence):
@@ -57,13 +59,16 @@ def partial():
 
 class TestShotTape:
     def test_unused_tail_of_the_last_batch_is_kept(self, evidence):
-        assert evidence["tape"] == [{
+        (batch,) = evidence["tape"]
+        started, finished = batch.pop("started_at"), batch.pop("finished_at")
+        assert batch == {
             "job_id": None, "backend": "fake", "shots": 8,
             "bitstrings": ["111", "010", "101", "110", "000", "100", "011", "001"], "error": None,
-        }]
+        }
+        assert parse_timestamp(started) <= parse_timestamp(finished)
         assert evidence["status"] == "completed"
         assert evidence["error"] is None
-        assert evidence["version"] == "2"
+        assert evidence["version"] == "3"
 
     def test_pool_hash_commits_to_the_tail(self, evidence):
         evidence["tape"][0]["bitstrings"][-1] = "011"
@@ -178,7 +183,9 @@ class TestLevelB:
         (lambda e: e["circuit"].update(sha256="0" * 64), "circuit.sha256 does not match"),
         (lambda e: e["circuit"].update(qasm=e["circuit"]["qasm"] + "\nx q[0];"), "circuit.sha256 does not match"),
         (lambda e: e.pop("circuit"), "circuit.qasm is missing."),
-        (lambda e: e.update(version="1"), "version is '1', expected '2'."),
+        (lambda e: e.update(version="2"), "version is '2', expected '3'."),
+        (lambda e: e["extractor"].update(input_bits=256), "extractor is {"),
+        (lambda e: e.pop("extractor"), "extractor is None"),
         (lambda e: e.pop("request"), "request is missing."),
         (lambda e: e["request"].update(min_val="1"), "request does not describe a valid range"),
         (lambda e: e["request"].update(max_val=6), "range is (1, 5), but the request resolves to (1, 6)."),
@@ -190,10 +197,10 @@ class TestLevelB:
         (lambda e: e.pop("tape"), "tape must be a list"),
         (lambda e: e["tape"].append("batch"), "tape[1]: expected an object"),
         (lambda e: e.update(job_ids=["forged"]), "job_ids ['forged'] do not match"),
-        (lambda e: e["tape"][0]["bitstrings"].__setitem__(1, "011"), "items do not replay from the shot tape; "
-                                                                      "first difference at shot 1."),
-        (lambda e: e["tape"][0].update(bitstrings=["111", "010"]), "items do not replay from the shot tape; "
-                                                                   "first difference at shot 2."),
+        (lambda e: e["tape"][0]["bitstrings"].__setitem__(1, "011"),
+         "items do not replay from the conditioned shot tape; first difference at candidate 1."),
+        (lambda e: e["tape"][0].update(bitstrings=["111", "010"]),
+         "items do not replay from the conditioned shot tape; first difference at candidate 2."),
         (lambda e: e["tape"][0]["bitstrings"].append("12"), "tape shot 8 '12' is not a 3-bit binary string."),
     ])
     def test_sealed_edits_are_still_caught(self, evidence, mutate, message):
@@ -221,13 +228,13 @@ class TestLevelB:
     def test_malformed_rejected_list_is_skipped_in_replay(self, evidence):
         ok, errors = edited(evidence, lambda e: e["items"][1].update(rejected="x"))
         assert not ok
-        assert errors == ["items do not replay from the shot tape; first difference at shot 2."]
+        assert errors == ["items do not replay from the conditioned shot tape; first difference at candidate 2."]
 
     def test_partial_tail_must_be_all_rejects(self, partial):
         ok, errors = edited(partial, lambda e: e["tape"][0]["bitstrings"].append("001"))
         assert not ok
         assert errors == [
-            "tape shot 2 decodes to 1, within range size 5; a partial run would have accepted it."
+            "conditioned candidate 2 decodes to 1, within range size 5; a partial run would have accepted it."
         ]
 
 
@@ -244,8 +251,8 @@ class TestCli:
         assert code == 0
         assert out.splitlines() == [
             "PASS: Level A (reproducible conversion)",
-            "PASS: Level B (tamper-evident provenance)",
-            "SKIP: Level C (Physical CHSH Non-locality) was not run; the evidence has no chsh_data",
+            "PASS: Level B (tamper-evident provenance) via checksum only (self-consistent; not authenticated)",
+            "SKIP: Level C (near-real-time CHSH spot-check) was not run; the evidence has no chsh_data",
         ]
 
     def test_verify_notes_partial_evidence(self, partial, capsys, monkeypatch):

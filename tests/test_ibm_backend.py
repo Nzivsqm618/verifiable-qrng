@@ -13,6 +13,8 @@ from vqrng.backends import BackendRun, IBMBackend
 from vqrng.backends import ibm as ibm_module
 from vqrng.core import build_circuit
 
+pytestmark = pytest.mark.usefixtures("passthrough_extractor")
+
 CREATED = "2026-09-28T06:00:00Z"
 RUNNING = "2026-09-28T06:00:12.500000Z"
 
@@ -62,7 +64,7 @@ def ibm(monkeypatch):
     sampler = sampler_cls.return_value
     sampler.options = SimpleNamespace()
     jobs = []
-    sampler.run.side_effect = lambda circuits, shots: jobs.pop(0)
+    sampler.run.side_effect = lambda pubs: jobs.pop(0)
 
     pass_manager = MagicMock(name="generate_preset_pass_manager")
     pass_manager.return_value.run.side_effect = lambda circuit: circuit
@@ -235,7 +237,7 @@ class TestTiming:
     def test_qpu_time_and_queue_time_come_from_job_metrics(self, ibm):
         ibm.jobs.append(make_job(["0"]))
         run = IBMBackend(log=lambda message: None).run(build_circuit(1), 8, 10)
-        assert run == BackendRun(["0"], "ibm_sherbrooke", 1.5, 12.5, "job-1")
+        assert run == BackendRun(["0"], "ibm_sherbrooke", 1.5, 12.5, "job-1", None, "2026-09-28T06:00:12.500000+00:00")
 
     def test_charge_time_is_used_when_quantum_seconds_is_absent(self):
         assert ibm_module.quantum_seconds_from_metrics({"usage": {"qpu_charge_time_seconds": 3}}) == 3.0
@@ -417,6 +419,56 @@ class TestPartialRecovery:
         with pytest.raises(vqrng.BackendJobError, match="unreadable result: bad payload") as exc:
             IBMBackend(log=lambda message: None).run(build_circuit(1), 8, 10)
         assert exc.value.job_id == "job-1"
+
+
+class TestOneJobForManyCircuits:
+    def test_every_circuit_is_a_pub_of_one_job(self, ibm):
+        job = make_job(["0"], metrics={
+            "usage": {"quantum_seconds": 4.0},
+            "timestamps": {"created": CREATED, "running": RUNNING, "finished": "2026-09-28T06:00:15Z"},
+        })
+        job.result.return_value = [SimpleNamespace(data={"c": register(bits)}) for bits in (["1"], ["01"], ["10"])]
+        ibm.jobs.append(job)
+        runs = IBMBackend(log=lambda message: None).run_many(
+            [(build_circuit(1), 8), (build_circuit(2), 4), (build_circuit(2), 4)], 10
+        )
+        (pubs,), _ = ibm.sampler.run.call_args
+        assert [shots for _, _, shots in pubs] == [8, 4, 4]
+        assert [run.bitstrings for run in runs] == [["1"], ["01"], ["10"]]
+        assert [run.quantum_seconds for run in runs] == [4.0, 0.0, 0.0]
+        assert [run.queue_seconds for run in runs] == [12.5, 0.0, 0.0]
+        assert {run.job_id for run in runs} == {"job-1"}
+        assert {(run.started_at, run.finished_at) for run in runs} == {
+            ("2026-09-28T06:00:12.500000+00:00", "2026-09-28T06:00:15+00:00")
+        }
+        ibm.service.return_value.least_busy.assert_called_once_with(
+            operational=True, simulator=False, min_num_qubits=2
+        )
+
+    def test_chsh_runs_in_the_first_hardware_job(self, ibm):
+        job = make_job(["1"] * 8, job_id="job-7")
+        job.result.return_value = [SimpleNamespace(data={"c": register(["1"] * 8)})] + [
+            SimpleNamespace(data={"c": register(bits)}) for bits in (["00", "11"], ["00", "11"], ["00", "11"], ["01", "10"])
+        ]
+        ibm.jobs.append(job)
+        evidence = vqrng.generate(0, 1, mode="hardware", runtime_limit=10, chsh=True, chsh_shots=2)
+        assert ibm.sampler.run.call_count == 1
+        runs = evidence["chsh_data"]["runs"]
+        assert {run["job_id"] for run in runs.values()} == {"job-7"}
+        assert evidence["tape"][0]["started_at"] == runs["A0B0"]["started_at"]
+        assert evidence["quantum_seconds"] == 1.5
+        result = vqrng.verify(evidence)
+        assert result.is_valid and result.chsh_s_value == 4.0
+
+    @pytest.mark.parametrize(("timestamps", "window"), [
+        ({"running": "2026-09-28T06:00:00Z", "finished": "2026-09-28T16:00:00+10:00"},
+         ("2026-09-28T06:00:00+00:00", "2026-09-28T06:00:00+00:00")),
+        ({"running": "2026-09-28T06:00:00"}, (None, None)),
+        ({"finished": "later"}, (None, None)),
+        (None, (None, None)),
+    ])
+    def test_execution_window_from_metrics(self, timestamps, window):
+        assert ibm_module.execution_window_from_metrics({"timestamps": timestamps}) == window
 
 
 def register(bitstrings):

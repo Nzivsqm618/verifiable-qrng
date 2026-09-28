@@ -7,18 +7,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any
 
-EVIDENCE_VERSION = "2"
+EVIDENCE_VERSION = "3"
 STATUS_COMPLETED = "completed"
 STATUS_PARTIAL = "partial"
 STATUSES = (STATUS_COMPLETED, STATUS_PARTIAL)
+
+# Added after pool_hash is computed, so the hash cannot cover them.
+UNHASHED_FIELDS = ("pool_hash", "signature", "public_key")
 
 # Measurement settings in the order the CHSH sum uses them, and the
 # two-bit outcomes of each, Alice's bit first.
 CHSH_SETTINGS = ("A0B0", "A0B1", "A1B0", "A1B1")
 CHSH_OUTCOMES = ("00", "01", "10", "11")
 CHSH_CLASSICAL_BOUND = 2.0
+CHSH_MAX_GAP_SECONDS = 10.0
 
 
 def resolve_range(
@@ -51,5 +56,20 @@ def sha256_hex(text: str) -> str:
 
 
 def payload_hash(evidence: dict) -> str:
-    """Hash every evidence field except ``pool_hash`` itself."""
-    return sha256_hex(canonical_json({k: v for k, v in evidence.items() if k != "pool_hash"}))
+    """Hash every evidence field except ``pool_hash``, ``signature``, and ``public_key``."""
+    return sha256_hex(canonical_json({k: v for k, v in evidence.items() if k not in UNHASHED_FIELDS}))
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    """Parse an ISO 8601 timestamp that carries a UTC offset, or return ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None

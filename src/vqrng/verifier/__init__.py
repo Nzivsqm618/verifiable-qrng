@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from vqrng.verifier.level_a import verify_level_a
-from vqrng.verifier.level_b import verify_level_b
+from vqrng.verifier.level_b import (
+    ASSURANCE_AUTHENTIC,
+    ASSURANCE_CHECKSUM,
+    ASSURANCE_SIGNED,
+    check_level_b,
+    verify_level_b,
+)
 from vqrng.verifier.level_c import verify_level_c
 
 LEVEL_NAMES = {
     "A": "reproducible conversion",
     "B": "tamper-evident provenance",
-    "C": "Physical CHSH Non-locality",
+    "C": "near-real-time CHSH spot-check",
 }
 PASS, FAIL, SKIPPED = "pass", "fail", "skipped"
 
@@ -37,15 +44,23 @@ class VerificationResult:
 
     ``is_valid`` is true when every level that ran passed; skipped levels do
     not count. ``evidence_status`` echoes the payload's ``status``, so a
-    ``"partial"`` record verifies but is visibly incomplete. Level C runs only
-    when the evidence has ``chsh_data``; ``chsh_s_value`` is the CHSH value S
-    it computed, or ``None`` when it was skipped or the counts were unusable.
+    ``"partial"`` record verifies but is visibly incomplete.
+
+    ``level_b_assurance`` says how Level B passed: ``"checksum-only"`` (the
+    payload is self-consistent), ``"signed-untrusted-key"`` (validly signed,
+    but by a key nobody vouched for), or ``"authentic"`` (signed by one of the
+    trusted keys). It is ``None`` when Level B failed.
+
+    Level C runs only when the evidence has ``chsh_data``; ``chsh_s_value``
+    is the CHSH value S it computed, or ``None`` when it was skipped or the
+    counts were unusable.
     """
 
     is_valid: bool
     errors: list[str] = field(default_factory=list)
     levels: dict[str, LevelResult] = field(default_factory=dict)
     evidence_status: str | None = None
+    level_b_assurance: str | None = None
     level_c_passed: bool = False
     chsh_s_value: float | None = None
 
@@ -65,8 +80,12 @@ def _level_c(evidence: object) -> tuple[LevelResult, float | None]:
     return _level("C", errors), s_value
 
 
-def verify(evidence: dict | str) -> VerificationResult:
-    """Verify an evidence dictionary or its JSON string at every implemented level."""
+def verify(evidence: dict | str, trusted_keys: Iterable[str] | None = None) -> VerificationResult:
+    """Verify an evidence dictionary or its JSON string at every level.
+
+    ``trusted_keys`` are hex Ed25519 public keys the caller already trusts.
+    When given, Level B fails unless the evidence is signed by one of them.
+    """
     if isinstance(evidence, str):
         try:
             evidence = json.loads(evidence)
@@ -75,10 +94,11 @@ def verify(evidence: dict | str) -> VerificationResult:
             levels = {"A": _level("A", [message]), "B": _level("B", [message]), "C": _not_run()}
             return VerificationResult(False, [message], levels)
 
+    level_b_errors, assurance = check_level_b(evidence, trusted_keys)
     level_c, s_value = _level_c(evidence)
     levels = {
         "A": _level("A", verify_level_a(evidence)[1]),
-        "B": _level("B", verify_level_b(evidence)[1]),
+        "B": _level("B", level_b_errors),
         "C": level_c,
     }
     errors = [f"Level {r.level}: {error}" for r in levels.values() for error in r.errors]
@@ -88,11 +108,13 @@ def verify(evidence: dict | str) -> VerificationResult:
         errors=errors,
         levels=levels,
         evidence_status=status if isinstance(status, str) else None,
+        level_b_assurance=assurance,
         level_c_passed=level_c.passed,
         chsh_s_value=s_value,
     )
 
 
 __all__ = [
+    "ASSURANCE_AUTHENTIC", "ASSURANCE_CHECKSUM", "ASSURANCE_SIGNED",
     "LevelResult", "VerificationResult", "verify", "verify_level_a", "verify_level_b", "verify_level_c",
 ]

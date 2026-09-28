@@ -9,6 +9,8 @@ from vqrng import cli
 from vqrng.verifier.level_a import verify_level_a
 from tests.test_generate import fake_source
 
+pytestmark = pytest.mark.usefixtures("passthrough_extractor")
+
 
 @pytest.fixture
 def evidence():

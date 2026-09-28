@@ -6,6 +6,8 @@ import vqrng
 from vqrng.core import bits_for_range
 from tests.test_generate import fake_source
 
+pytestmark = pytest.mark.usefixtures("passthrough_extractor")
+
 
 class TestRangeBounds:
     @pytest.mark.parametrize(

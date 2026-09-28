@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import sys
 import time
-from collections.abc import Callable, Mapping
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from vqrng.backends.base import BackendJobError, BackendRun, BaseBackend, normalize_bitstrings
@@ -58,6 +59,16 @@ def _parse_time(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def execution_window_from_metrics(metrics: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Return IBM's ``running`` and ``finished`` times as ISO 8601 UTC, where reported."""
+    timestamps = metrics.get("timestamps") or {}
+    window = []
+    for key in ("running", "finished"):
+        parsed = _parse_time(timestamps.get(key))
+        window.append(None if parsed is None or parsed.tzinfo is None else parsed.astimezone(timezone.utc).isoformat())
+    return window[0], window[1]
 
 
 def queue_seconds_from_metrics(metrics: Mapping[str, Any]) -> float | None:
@@ -149,20 +160,32 @@ class IBMBackend(BaseBackend):
         return self._backend
 
     def run(self, circuit: QuantumCircuit, shots: int, budget: float | None) -> BackendRun:
+        return self.run_many([(circuit, shots)], budget)[0]
+
+    def run_many(
+        self, circuits: Sequence[tuple[QuantumCircuit, int]], budget: float | None
+    ) -> list[BackendRun]:
+        """Run every ``(circuit, shots)`` pair as one pub of a single Sampler job.
+
+        The job's QPU and queue time are reported on the first result only, so
+        adding the results up does not count them twice.
+        """
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
         from qiskit_ibm_runtime import SamplerV2
 
-        backend = self._select_backend(circuit.num_qubits)
-        isa_circuit = generate_preset_pass_manager(optimization_level=1, backend=backend).run(circuit)
+        backend = self._select_backend(max(circuit.num_qubits for circuit, _ in circuits))
+        pass_manager = generate_preset_pass_manager(optimization_level=1, backend=backend)
+        pubs = [(pass_manager.run(circuit), None, shots) for circuit, shots in circuits]
         sampler = SamplerV2(mode=backend)
         # Leave max_execution_time unset. IBM cancels the job when that limit
         # trips and still bills the QPU time already used, so the option spends
         # credit and returns no shots. ``budget`` only decides later batches.
 
         submitted = self._clock()
-        job = sampler.run([isa_circuit], shots=shots)
+        job = sampler.run(pubs)
         job_id = job.job_id()
-        self._log(f"job {job_id} submitted to {backend.name} ({shots} shots)")
+        shot_list = ", ".join(str(shots) for _, shots in circuits)
+        self._log(f"job {job_id} submitted to {backend.name} ({shot_list} shots)")
 
         def failed(message: str) -> BackendJobError:
             # Usage is unknown, so count the whole remaining budget and stop.
@@ -189,7 +212,8 @@ class IBMBackend(BaseBackend):
             raise failed(f"IBM job {job_id} on {backend.name} ended with status {status}{suffix}")
 
         try:
-            bitstrings = extract_bitstrings(job.result()[0], circuit)
+            results = job.result()
+            measured = [extract_bitstrings(results[i], circuit) for i, (circuit, _) in enumerate(circuits)]
         except Exception as exc:
             raise failed(f"IBM job {job_id} on {backend.name} returned an unreadable result: {exc}") from exc
 
@@ -208,11 +232,18 @@ class IBMBackend(BaseBackend):
             # Without server timestamps, queue time is only known to the poll interval.
             queue_seconds = (finished if running_at is None else running_at) - submitted
 
+        started_at, finished_at = execution_window_from_metrics(metrics)
+
         self._log(
             f"job {job_id} DONE: {quantum_seconds:.2f}s QPU, {queue_seconds:.1f}s queued, "
             f"{finished - submitted:.1f}s total"
         )
-        return BackendRun(bitstrings, backend.name, quantum_seconds, queue_seconds, job_id, charged_seconds)
+        first = BackendRun(
+            measured[0], backend.name, quantum_seconds, queue_seconds, job_id, charged_seconds,
+            started_at, finished_at,
+        )
+        rest = replace(first, quantum_seconds=0.0, queue_seconds=0.0, charged_seconds=None)
+        return [first] + [replace(rest, bitstrings=bits) for bits in measured[1:]]
 
     def _cancel(self, job: Any, job_id: str) -> None:
         try:

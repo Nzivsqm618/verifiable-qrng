@@ -60,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Number of values to generate (default: 1).")
     parser.add_argument("-t", "--runtime", type=_positive_int, metavar="INTEGER",
                         help="Maximum QPU runtime budget in seconds.")
+    parser.add_argument("--backend", metavar="NAME",
+                        help="With -h/--hardware, run on this IBM QPU instead of the least busy one.")
 
     parser.add_argument("--help", action="help", help="Show this message and exit.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {vqrng.__version__}")
@@ -83,6 +85,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         raise UsageError("--pad requires -d/--digits")
     if args.mode == "hardware" and args.runtime is None:
         raise UsageError("-t/--runtime is required with -h/--hardware")
+    if args.backend is not None and args.mode != "hardware":
+        raise UsageError("--backend requires -h/--hardware")
     return args
 
 
@@ -207,7 +211,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mode=args.mode,
                 pool_size=args.pool,
                 runtime_limit=args.runtime,
+                backend=args.backend,
             )
+        except KeyboardInterrupt:
+            _write(sys.stderr, "vqrng: interrupted.")
+            return EXIT_ERROR
         except Exception as exc:
             _write(sys.stderr, f"vqrng: error: {exc}")
             return EXIT_ERROR

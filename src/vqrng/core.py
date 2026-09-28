@@ -5,19 +5,24 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from qiskit import QuantumCircuit, qasm2
 
+from vqrng.backends import AerBackend, BackendRun, BaseBackend, IBMBackend
+
 EVIDENCE_VERSION = "1"
-MODES = ("aer", "hardware")
+BACKENDS: dict[str, type[BaseBackend]] = {"aer": AerBackend, "hardware": IBMBackend}
+MODES = tuple(BACKENDS)
 MAX_BATCHES = 64
 
-# (circuit, shots, remaining_budget_seconds) -> (bitstrings, backend_name, quantum_seconds_used)
-BitSource = Callable[[QuantumCircuit, int, "float | None"], "tuple[list[str], str, float]"]
+# (circuit, shots, remaining_budget_seconds) -> BackendRun, or (bitstrings, backend_name, quantum_seconds)
+BitSource = Callable[
+    [QuantumCircuit, int, "float | None"], "BackendRun | tuple[list[str], str, float]"
+]
 
 
 def resolve_range(
@@ -64,33 +69,6 @@ def format_number(number: int, digits: int | None, pad: bool) -> str:
     return str(number).zfill(digits) if pad and digits is not None else str(number)
 
 
-def aer_source(circuit: QuantumCircuit, shots: int, budget: float | None) -> tuple[list[str], str, float]:
-    from qiskit_aer import AerSimulator
-
-    backend = AerSimulator()
-    result = backend.run(circuit, shots=shots, memory=True).result()
-    return result.get_memory(), backend.name, 0.0
-
-
-def hardware_source(circuit: QuantumCircuit, shots: int, budget: float | None) -> tuple[list[str], str, float]:
-    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
-
-    token = os.environ.get("IBMQ_API_TOKEN")
-    service = QiskitRuntimeService(token=token) if token else QiskitRuntimeService()
-    backend = service.least_busy(operational=True, simulator=False, min_num_qubits=circuit.num_qubits)
-
-    isa_circuit = generate_preset_pass_manager(optimization_level=1, backend=backend).run(circuit)
-    sampler = SamplerV2(mode=backend)
-    if budget is not None:
-        sampler.options.max_execution_time = max(1, math.floor(budget))
-
-    job = sampler.run([isa_circuit], shots=shots)
-    bitstrings = job.result()[0].data[circuit.cregs[0].name].get_bitstrings()
-    used = float(job.usage() or 0.0)
-    return bitstrings, backend.name, used
-
-
 def _sample_pool(
     low: int,
     range_size: int,
@@ -99,11 +77,13 @@ def _sample_pool(
     circuit: QuantumCircuit,
     source: BitSource,
     runtime_limit: int | None,
-) -> tuple[list[dict[str, Any]], str | None, float]:
+) -> tuple[list[dict[str, Any]], str | None, float, float, list[str]]:
     items: list[dict[str, Any]] = []
     rejected: list[str] = []
     backend_name: str | None = None
     quantum_seconds = 0.0
+    queue_seconds = 0.0
+    job_ids: list[str] = []
     acceptance = range_size / 2**n_bits
 
     for _ in range(MAX_BATCHES):
@@ -121,10 +101,16 @@ def _sample_pool(
                 )
 
         shots = max(8, math.ceil(needed / acceptance * 1.25))
-        bitstrings, backend_name, used = source(circuit, shots, remaining)
-        quantum_seconds += used
+        run = source(circuit, shots, remaining)
+        if not isinstance(run, BackendRun):
+            run = BackendRun(*run)
+        backend_name = run.backend_name
+        quantum_seconds += run.quantum_seconds
+        queue_seconds += run.queue_seconds
+        if run.job_id is not None:
+            job_ids.append(run.job_id)
 
-        for bits in bitstrings:
+        for bits in run.bitstrings:
             candidate = int(bits, 2)
             if candidate >= range_size:
                 rejected.append(bits)
@@ -143,7 +129,7 @@ def _sample_pool(
     else:
         raise RuntimeError(f"Rejection sampling did not converge after {MAX_BATCHES} batches.")
 
-    return items, backend_name, quantum_seconds
+    return items, backend_name, quantum_seconds, queue_seconds, job_ids
 
 
 def generate(
@@ -154,6 +140,7 @@ def generate(
     mode: str = "aer",
     pool_size: int = 1,
     runtime_limit: int | None = None,
+    backend: str | None = None,
     *,
     _source: BitSource | None = None,
 ) -> dict:
@@ -163,6 +150,10 @@ def generate(
     zero-padding via ``pad``). Returns an evidence dictionary whose ``items``
     carry each ``number``, its zero-padded or plain ``formatted`` string, the
     accepted ``bitstring``, and any ``rejected`` bitstrings preceding it.
+
+    ``mode="hardware"`` runs on IBM Quantum and requires ``runtime_limit`` (QPU
+    seconds) plus an ``IBMQ_API_TOKEN`` or ``QISKIT_IBM_TOKEN`` environment
+    variable. ``backend`` names a specific QPU; by default the least busy one is used.
     """
     low, high = resolve_range(min_val, max_val, digits, pad)
     if mode not in MODES:
@@ -173,17 +164,26 @@ def generate(
         raise ValueError("runtime_limit must be >= 2 seconds.")
     if mode == "hardware" and runtime_limit is None:
         raise ValueError("runtime_limit is required in hardware mode.")
+    if backend is not None and mode != "hardware":
+        raise ValueError("backend can only be chosen in hardware mode.")
 
     range_size = high - low + 1
     n_bits = bits_for_range(range_size)
     circuit = build_circuit(n_bits)
     circuit_qasm = qasm2.dumps(circuit)
-    source = _source or (aer_source if mode == "aer" else hardware_source)
+    if _source is not None:
+        source: BitSource = _source
+    elif mode == "hardware":
+        source = IBMBackend(backend)
+    else:
+        source = BACKENDS[mode]()
 
-    items, backend_name, quantum_seconds = _sample_pool(
+    started = time.monotonic()
+    items, backend_name, quantum_seconds, queue_seconds, job_ids = _sample_pool(
         low, range_size, n_bits, pool_size, circuit, source,
         runtime_limit if mode == "hardware" else None,
     )
+    wall_seconds = time.monotonic() - started
     for item in items:
         item["formatted"] = format_number(item["number"], digits, pad)
 
@@ -199,11 +199,15 @@ def generate(
             "pad": pad,
             "pool_size": pool_size,
             "runtime_limit": runtime_limit,
+            "backend": backend,
         },
         "range": {"min": low, "max": high, "size": range_size},
         "n_bits": n_bits,
         "circuit": {"qasm": circuit_qasm, "sha256": sha256_hex(circuit_qasm)},
         "quantum_seconds": quantum_seconds,
+        "queue_seconds": queue_seconds,
+        "wall_seconds": wall_seconds,
+        "job_ids": job_ids,
         "items": items,
         "pool_hash": sha256_hex(canonical_json(items)),
     }

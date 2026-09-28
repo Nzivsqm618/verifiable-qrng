@@ -75,9 +75,14 @@ vqrng -s -p 20 1 1000
 Submit to physical IBM QPU hardware with a 300-second maximum QPU runtime budget:
 
 ```bash
-export IBMQ_API_TOKEN="your_ibm_quantum_api_token"
+export IBMQ_API_TOKEN="your_ibm_quantum_api_token"   # or QISKIT_IBM_TOKEN
 vqrng -h -t 300 -p 10 1 100
+
+# N-digit OTP on hardware, pinned to a specific QPU
+vqrng -h -t 300 --backend ibm_torino -d 6 --pad
 ```
+
+`vqrng` uses the least busy operational QPU unless `--backend` is given. Job status (`QUEUED`, `RUNNING`, `DONE`, `ERROR`, `CANCELLED`) is reported on stderr with timestamps, so stdout carries only the numbers or JSON. The evidence records `quantum_seconds` (QPU time), `queue_seconds`, `wall_seconds`, and the IBM `job_ids`. Pressing Ctrl+C while a job is waiting cancels it so it does not use more QPU time.
 
 ### 4. JSON Evidence and Verification
 
